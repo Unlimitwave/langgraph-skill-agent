@@ -1,0 +1,15 @@
+deepagents>=0.2.0
+langgraph>=1.1.0
+python-dotenv>=1.0.0
+langchain-openai>=0.2.0
+pypdf>=5.0.0
+pymupdf>=1.24.0
+llama-index-core>=0.11.0
+llama-index-readers-file>=0.2.0
+llama-index-embeddings-openai>=0.2.0
+llama-index-retrievers-bm25>=0.2.0
+llama-index-vector-stores-milvus>=0.9.0
+pymilvus>=2.4.0
+rank-bm25>=0.2.2
+requests>=2.31.0
+fastmcp>=3.0.0
