@@ -118,20 +118,30 @@ def _plan_routing_enabled() -> bool:
 
 
 def build_agent() -> Any:
+    # 配置全局的logging配置
     configure_logging()
+
+    # 构建模型
     model = build_deepseek_chat_model(streaming=True)
     backend = FilesystemBackend(root_dir=str(PROJECT_ROOT), virtual_mode=True)
 
+    # 加载MCP工具
     try:
         mcp_tools = load_mcp_extra_tools()
     except Exception as e:
         logger.warning("MCP 工具加载失败，已跳过: %s", e)
         mcp_tools = []
 
+    # 构建host工具
     host_tools = make_host_skill_tools(PROJECT_ROOT)
+
+    # 构建extra工具
     extra_tools = [*host_tools, rag_search, run_skill_script_in_docker, *mcp_tools]
+
+    # 加载记忆块
     memory_block = load_agent_memory_blocks()
 
+    # 构建系统提示
     system_prompt = f"""You are a helpful assistant, you can use the tools to help the user.
 When a skill asks to run a Python script under skills/:
 - Prefer run_skill_script_in_docker with path relative to skills/ (e.g. test-calc-script/run_calc.py).
@@ -143,6 +153,7 @@ The following files were loaded at session start and are authoritative for perso
 {memory_block}
 """
 
+    # 构建agent
     return create_deep_agent(
         model=model,
         backend=backend,
@@ -163,10 +174,15 @@ The following files were loaded at session start and are authoritative for perso
 
 
 def main() -> None:
+    # 构建agent
     agent = build_agent()
+
+    # 设置线程ID
     thread_id = os.environ.get("THREAD_ID", "demo-thread-1")
     config = {"configurable": {"thread_id": thread_id}}
     print("持续对话（quit / exit / q 退出）\n")
+
+    # 持续对话
     while True:
         try:
             user_text = input("你: ").strip()
@@ -178,7 +194,8 @@ def main() -> None:
         if user_text.lower() in {"quit", "exit", "q"}:
             print("再见。")
             break
-
+        
+        # 判断是否需要规划，读取.env中的ENABLE_PLAN_ROUTING配置
         if _plan_routing_enabled():
             from langgraph_skill_agent.intent_router import user_needs_plan_execute
             from langgraph_skill_agent.plan_execute import run_macro_task
@@ -192,7 +209,7 @@ def main() -> None:
         def _compact_trace(msg: str) -> None:
             if os.environ.get("RAG_TRACE", "").strip() in {"1", "true", "yes", "on"}:
                 logger.info("[COMPACT] %s", msg)
-
+        # 根据上下文长度。如果上下文过长，压缩对话上下文
         maybe_compact_thread(agent, config, on_trace=_compact_trace)
         sys.stdout.write("助手: ")
         sys.stdout.flush()

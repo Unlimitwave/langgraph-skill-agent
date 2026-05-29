@@ -23,7 +23,7 @@ from langgraph_skill_agent.utility.streaming import format_status_line, stream_a
 
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
 
-
+# TODO (author:caoyintao): 2026-05-29 待检查整个模块，待测试
 def _render_assistant_block(
     placeholder,
     *,
