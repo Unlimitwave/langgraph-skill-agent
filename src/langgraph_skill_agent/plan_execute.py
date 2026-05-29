@@ -2,8 +2,9 @@
 显式 todo 外层 LangGraph：planner（结构化计划）→ executor（逐步调用现有 Deep Agent）。
 
 用法（项目根目录，需已配置 .env 中的 DEEPSEEK_API_KEY）：
-  python plan_execute.py "你的复杂目标一句话"
-  python plan_execute.py -t my-macro-1 "目标..."
+  langgraph-plan "你的复杂目标一句话"
+  langgraph-plan -t my-macro-1 "目标..."
+  # 或：python -m langgraph_skill_agent.plan_execute "目标..."
 
 每步 Deep Agent 使用独立 checkpointer 线程：{macro_thread_id}:todo:{todo_id}，
 避免多步工具记录混在同一线程。
@@ -25,10 +26,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
-from agent_skills import build_agent, build_chat_model
-from llm_json import extract_first_json_object, message_content_to_str
-from logging_config import configure_logging
-from utility import stream_assistant_reply
+from langgraph_skill_agent.agent_core import build_agent, build_chat_model
+from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
+from langgraph_skill_agent.utility.logging_config import configure_logging
+from langgraph_skill_agent.utility.streaming import stream_assistant_reply
 
 logger = logging.getLogger(__name__)
 

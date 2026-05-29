@@ -23,13 +23,8 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_openai import ChatOpenAI
-from dotenv import load_dotenv
-from pathlib import Path
-
-from utility import _stringify_message_content
-
-_PROJECT_ROOT = Path(__file__).resolve().parent
+from langgraph_skill_agent.deepseek_model import build_deepseek_chat_model
+from langgraph_skill_agent.utility.messages import stringify_message_content
 
 
 def _load_tiktoken_encoder():
@@ -74,7 +69,7 @@ def message_to_plain_text(msg: BaseMessage) -> str:
         label = f"Tool({name})"
     else:
         label = role or "Unknown"
-    body = _stringify_message_content(getattr(msg, "content", None)).strip()
+    body = stringify_message_content(getattr(msg, "content", None)).strip()
     return f"### {label}\n{body}".strip()
 
 
@@ -123,19 +118,8 @@ def should_compact(messages: Sequence[BaseMessage], *, extra_text: str = "") -> 
     return used > (max_ctx - reserve)
 
 
-def _default_summarizer_model() -> ChatOpenAI:
-    load_dotenv(_PROJECT_ROOT / ".env")
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("压缩需要 DEEPSEEK_API_KEY（.env）。")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-    return ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url="https://api.deepseek.com",
-        streaming=False,
-        temperature=0.2,
-    )
+def _default_summarizer_model() -> BaseChatModel:
+    return build_deepseek_chat_model(streaming=False).model_copy(update={"temperature": 0.2})
 
 
 def summarize_transcript(transcript: str, *, llm: BaseChatModel | None = None) -> str:
@@ -153,7 +137,7 @@ def summarize_transcript(transcript: str, *, llm: BaseChatModel | None = None) -
         content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000]
     )
     out = model.invoke([sys, human])
-    text = _stringify_message_content(getattr(out, "content", "")).strip()
+    text = stringify_message_content(getattr(out, "content", "")).strip()
     return text or "(empty summary)"
 
 

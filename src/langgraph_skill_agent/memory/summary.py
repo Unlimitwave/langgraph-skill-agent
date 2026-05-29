@@ -1,13 +1,13 @@
 """
-手动运行：根据对话快照适当更新 agent_memory/soul.md、user.md、Memory.md。
+手动运行：根据对话快照适当更新 var/agent_memory/soul.md、user.md、Memory.md。
 
 用法：
-  python summary.py                          # 使用 conversation_history/ 下最新的快照
-  python summary.py path/to/snapshot.json    # 指定快照
-  python summary.py --dry-run                # 只打印建议内容，不写文件
-  python summary.py --no-backup              # 不写 .bak 备份
+  langgraph-summary                          # 使用 var/conversation_history/ 下最新的快照
+  langgraph-summary path/to/snapshot.json    # 指定快照
+  langgraph-summary --dry-run                # 只打印建议内容，不写文件
+  langgraph-summary --no-backup              # 不写 .bak 备份
 
-依赖：与 agent_skills 相同（.env 中 DEEPSEEK_API_KEY；可选 DEEPSEEK_MODEL）。
+依赖：与 agent_core 相同（.env 中 DEEPSEEK_API_KEY；可选 DEEPSEEK_MODEL）。
 """
 
 from __future__ import annotations
@@ -20,15 +20,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from logging_config import configure_logging
 from langchain_core.messages import BaseMessage, messages_from_dict
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-MEM_DIR = PROJECT_ROOT / "agent_memory"
-HIST_DIR = PROJECT_ROOT / "conversation_history"
+from langgraph_skill_agent.deepseek_model import build_deepseek_chat_model
+from langgraph_skill_agent.utility.logging_config import configure_logging
+from langgraph_skill_agent.utility.messages import stringify_message_content
+from langgraph_skill_agent.utility.paths import AGENT_MEMORY_DIR, CONVERSATION_HISTORY_DIR
+
+MEM_DIR = AGENT_MEMORY_DIR
+HIST_DIR = CONVERSATION_HISTORY_DIR
 
 SOUL_PATH = MEM_DIR / "soul.md"
 USER_PATH = MEM_DIR / "user.md"
@@ -51,37 +52,8 @@ class UpdatedMemoryFiles(BaseModel):
     )
 
 
-def _build_chat_model(*, streaming: bool = False) -> ChatOpenAI:
-    load_dotenv(PROJECT_ROOT / ".env")
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("请在 .env 中设置 DEEPSEEK_API_KEY。")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-    return ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url="https://api.deepseek.com",
-        streaming=streaming,
-        temperature=0.3,
-    )
-
-
-def _stringify_message_content(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-            else:
-                parts.append(str(block))
-        return "".join(parts)
-    return str(content)
+def _build_chat_model(*, streaming: bool = False):
+    return build_deepseek_chat_model(streaming=streaming).model_copy(update={"temperature": 0.3})
 
 
 def _message_role_label(msg: BaseMessage) -> str:
@@ -114,7 +86,7 @@ def messages_json_to_transcript(
         role = _message_role_label(m)
         if role == "Tool" and not include_tools:
             continue
-        text = _stringify_message_content(getattr(m, "content", None)).strip()
+        text = stringify_message_content(getattr(m, "content", None)).strip()
         if not text:
             continue
         if role == "Tool" and include_tools:
@@ -274,12 +246,12 @@ def _parse_max_chars(s: str | None) -> int | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="根据对话快照更新 agent_memory/*.md")
+    parser = argparse.ArgumentParser(description="根据对话快照更新 var/agent_memory/*.md")
     parser.add_argument(
         "snapshot",
         nargs="?",
         default=None,
-        help="conversation_history 下的快照 json；省略则用最新文件",
+        help="var/conversation_history 下的快照 json；省略则用最新文件",
     )
     parser.add_argument(
         "--dry-run",

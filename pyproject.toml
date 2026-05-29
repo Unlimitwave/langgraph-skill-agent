@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langgraph-skill-agent"
+version = "0.1.0"
+description = "Deep Agent (LangGraph) with local Skills and RAG (LlamaIndex + Milvus)"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.2.0",
+    "langgraph>=1.1.0",
+    "python-dotenv>=1.0.0",
+    "langchain-openai>=0.2.0",
+    "langchain-deepseek>=1.0.0",
+    "pypdf>=5.0.0",
+    "pymupdf>=1.24.0",
+    "llama-index-core>=0.11.0",
+    "llama-index-readers-file>=0.2.0",
+    "llama-index-embeddings-openai>=0.2.0",
+    "llama-index-retrievers-bm25>=0.2.0",
+    "llama-index-vector-stores-milvus>=0.9.0",
+    "pymilvus>=2.4.0",
+    "rank-bm25>=0.2.2",
+    "requests>=2.31.0",
+    "fastmcp>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pandas>=2.0",
+]
+ui = [
+    "streamlit>=1.32.0",
+]
+
+[project.scripts]
+langgraph-agent = "langgraph_skill_agent.agent_core:main"
+langgraph-plan = "langgraph_skill_agent.plan_execute:main"
+langgraph-summary = "langgraph_skill_agent.memory.summary:main"
+langgraph-ui = "langgraph_skill_agent.frontend:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/langgraph_skill_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

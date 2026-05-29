@@ -26,7 +26,7 @@ except ImportError as e:  # pragma: no cover
         "请安装 Milvus 集成：pip install llama-index-vector-stores-milvus pymilvus"
     ) from e
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+from langgraph_skill_agent.utility.paths import RAG_DATA_DIR, RAG_STORAGE_DIR
 
 _RAG_RETRIEVER: Optional[BaseRetriever] = None
 
@@ -163,11 +163,8 @@ def _storage_has_index(persist_dir: Path) -> bool:
 
 
 def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
-    data_dir = Path(os.environ.get("RAG_DATA_DIR", str(PROJECT_ROOT / "data"))).expanduser()
-    storage_dir = Path(os.environ.get("RAG_STORAGE_DIR", str(PROJECT_ROOT / "storage"))).expanduser()
-
-    data_dir = data_dir if data_dir.is_absolute() else (PROJECT_ROOT / data_dir)
-    storage_dir = storage_dir if storage_dir.is_absolute() else (PROJECT_ROOT / storage_dir)
+    data_dir = RAG_DATA_DIR
+    storage_dir = RAG_STORAGE_DIR
 
     force_rebuild = _env_truthy("RAG_FORCE_REBUILD")
     if force_rebuild and storage_dir.exists():

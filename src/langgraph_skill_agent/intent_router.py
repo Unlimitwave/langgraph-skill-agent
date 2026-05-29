@@ -8,8 +8,8 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agent_skills import build_chat_model
-from llm_json import extract_first_json_object, message_content_to_str
+from langgraph_skill_agent.agent_core import build_chat_model
+from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
 
 logger = logging.getLogger(__name__)
 

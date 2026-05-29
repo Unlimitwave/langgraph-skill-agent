@@ -2,7 +2,12 @@
 ._.git
 .DS_Store
 ._.gitignore
-data/*
 .vscode/*
 ._*
-conversation_history/*
+var/
+dist/
+build/
+*.egg-info/
+.venv/
+__pycache__/
+.pytest_cache/
