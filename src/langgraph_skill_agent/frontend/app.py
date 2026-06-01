@@ -24,6 +24,8 @@ from langgraph_skill_agent.utility.streaming import format_status_line, stream_a
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
 
 # TODO (author:caoyintao): 2026-05-29 待检查整个模块，待测试
+
+# ui渲染，流式刷新 assistant 气泡
 def _render_assistant_block(
     placeholder,
     *,
@@ -43,12 +45,12 @@ def _render_assistant_block(
     else:
         placeholder.markdown("思考中…")
 
-
+# 确保目录存在
 def _history_dir() -> Path:
     SESSION_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     return SESSION_HISTORY_DIR
 
-
+# 保存会话历史
 def _save_session(session_id: str, sess: dict) -> None:
     path = _history_dir() / f"{session_id}.json"
     payload = {
@@ -59,7 +61,7 @@ def _save_session(session_id: str, sess: dict) -> None:
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
+# 加载会话历史
 def _load_sessions_from_disk() -> tuple[dict, str | None]:
     d = _history_dir()
     files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -78,12 +80,12 @@ def _load_sessions_from_disk() -> tuple[dict, str | None]:
     default_id = next(iter(sessions)) if sessions else None
     return sessions, default_id
 
-
+# 缓存 agent 实例
 @st.cache_resource
 def get_graph():
     return build_agent()
 
-
+# 初始化 session_state
 def _ensure_sessions():
     if "sessions" not in st.session_state:
         loaded, default_id = _load_sessions_from_disk()
@@ -102,7 +104,7 @@ def _ensure_sessions():
             st.session_state.active_session_id = tid
             _save_session(tid, st.session_state.sessions[tid])
 
-
+# TODO (author:caoyintao): 2026-06-01 待检查这部分
 def _active_session():
     _ensure_sessions()
     return st.session_state.sessions[st.session_state.active_session_id]
@@ -111,7 +113,7 @@ def _active_session():
 def _thread_config_for_active():
     return {"configurable": {"thread_id": _active_session()["thread_id"]}}
 
-
+# 新建会话
 def _new_session():
     tid = str(uuid.uuid4())
     st.session_state.sessions[tid] = {
@@ -122,7 +124,7 @@ def _new_session():
     st.session_state.active_session_id = tid
     _save_session(tid, st.session_state.sessions[tid])
 
-
+# 删除会话
 def _delete_session(sid: str) -> None:
     path = _history_dir() / f"{sid}.json"
     path.unlink(missing_ok=True)
@@ -142,13 +144,14 @@ def _delete_session(sid: str) -> None:
     if st.session_state.active_session_id == sid:
         st.session_state.active_session_id = next(iter(st.session_state.sessions.keys()))
 
-
+# 设置ui页面配置
 st.set_page_config(page_title="LangGraph Skill Agent", layout="wide")
 st.markdown("# LangGraph Skill Agent")
 st.caption("DeepSeek + Skills + RAG + MCP（内置 workspace_exec / run_skill_script 白名单）")
 
 _ensure_sessions()
 
+# 设置ui sidebar侧边栏
 with st.sidebar:
     st.subheader("会话")
     st.caption(f"项目根：`{PROJECT_ROOT}`")
@@ -186,6 +189,7 @@ with st.sidebar:
 active = _active_session()
 messages = active["messages"]
 
+# 取当前会话与 chat input 
 prompt = st.chat_input("输入消息…")
 
 if prompt:
@@ -194,6 +198,7 @@ if prompt:
     messages.append({"role": "user", "content": prompt})
     _save_session(st.session_state.active_session_id, active)
 
+# 渲染全部历史消息
 for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])

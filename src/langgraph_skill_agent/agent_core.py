@@ -213,6 +213,8 @@ def main() -> None:
         maybe_compact_thread(agent, config, on_trace=_compact_trace)
         sys.stdout.write("助手: ")
         sys.stdout.flush()
+
+        # 请求模型并流式回答
         iter_assistant_text_sync(
             agent,
             user_text=user_text,

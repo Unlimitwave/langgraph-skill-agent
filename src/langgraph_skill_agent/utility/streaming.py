@@ -14,14 +14,97 @@ from langgraph_skill_agent.utility.messages import stringify_message_content
 
 def tool_names_from_message_chunk(message_chunk: object) -> list[str]:
     names: list[str] = []
+
+
+    # 从消息中提取工具名称
     for tc in getattr(message_chunk, "tool_calls", None) or []:
+
+        """
+        message_chunk 中的toolcall 有2种，一种是完整的生成的toolcall，一种是分段的toolcall_chunks
+
+        完整的toolcall 形如：
+                message_chunk = {
+            "type": "AIMessageChunk",
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "search_web",
+                    "args": {"query": "LangGraph docs"},
+                    "id": "call_abc123",
+                    "type": "tool_call",
+                }
+            ],
+            "tool_call_chunks": [
+                {
+                    "name": None,
+                    "args": ' "LangGraph docs"}',
+                    "id": None,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+            "invalid_tool_calls": [],
+            "additional_kwargs": {},
+            "response_metadata": {
+                "model_name": "deepseek-chat",
+                "finish_reason": "tool_calls",
+            },
+            "id": "run-xxx-chunk-3",
+        }
+        """
         n = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
         if isinstance(n, str) and n.strip():
             names.append(n.strip())
+
+    """
+    分段的toolcall_chunks 形如：
+    （1）可能有name
+    message_chunk = {
+    "type": "AIMessageChunk",
+    "content": "",
+    "tool_calls": [],
+    "tool_call_chunks": [
+        {
+            "name": "search_web",
+            "args": "",
+            "id": "call_abc123",
+            "index": 0,
+            "type": "tool_call_chunk",
+        }
+    ],
+    "invalid_tool_calls": [],
+    "additional_kwargs": {},
+    "response_metadata": {},
+    "id": "run-xxx-chunk-1",
+    }
+
+    （2）可能没有name
+        message_chunk = {
+        "type": "AIMessageChunk",
+        "content": "",
+        "tool_calls": [],
+        "tool_call_chunks": [
+            {
+                "name": None,
+                "args": '{"query":',
+                "id": None,
+                "index": 0,
+                "type": "tool_call_chunk",
+            }
+        ],
+        "invalid_tool_calls": [],
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "id": "run-xxx-chunk-2",
+    }
+    """
+
+    # 从分段的toolcall_chunks中提取工具名称
     for part in getattr(message_chunk, "tool_call_chunks", None) or []:
         n = part.get("name") if isinstance(part, dict) else getattr(part, "name", None)
         if isinstance(n, str) and n.strip() and n.strip() not in names:
             names.append(n.strip())
+    
     return names
 
 
@@ -74,6 +157,36 @@ async def stream_assistant_text(
         version="v2",
     ):
         kind = chunk.get("type")
+
+        """
+
+        stream_mode=["messages", "tasks"]：同时订阅两类事件
+        messages：模型输出的 token/chunk
+        tasks：图中各节点（agent、tools 等）的开始/结束
+        version="v2"：使用 LangGraph v2 流式 API 的 chunk 格式
+
+        每个 chunk 大致形如：
+        message_chunk = {
+            "type": "AIMessageChunk",
+            "content": "",
+            "tool_calls": [],
+            "tool_call_chunks": [
+                {
+                    "name": "search_web",
+                    "args": "",
+                    "id": "call_abc123",
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }
+            ],
+            "invalid_tool_calls": [],
+            "additional_kwargs": {},
+            "response_metadata": {},
+            "id": "run-xxx-chunk-1",
+        }
+        """
+
+        # 处理任务事件
         if kind == "tasks":
             data = chunk.get("data")
             if not isinstance(data, dict):
@@ -96,14 +209,19 @@ async def stream_assistant_text(
                     agent_depth += 1
                 redraw()
             continue
-
+        
+        # 其他类型的事件，直接跳过
         if kind != "messages":
             continue
 
+        # 处理消息事件
         message_chunk, _meta = chunk["data"]
+
+
         names = tool_names_from_message_chunk(message_chunk)
         if names:
             pending_tool_names = names
+        # 将消息内容拼接成字符串
         piece = stringify_message_content(getattr(message_chunk, "content", None))
         if piece:
             buf.append(piece)
@@ -131,16 +249,57 @@ def iter_assistant_text_sync(
     config: dict,
     on_token: Callable[[str], None] | None = None,
 ) -> str:
+
+    """
+    tokens 是记录已经通过 on_token 发出去的内容
+
+    """
     tokens: list[str] = []
 
     def _on_update(*, status: str | None, text: str, cursor: bool) -> None:
         if on_token is None:
             return
+
+        """
+        text 是模型输出的完整内容
+        delta 是模型输出的增量内容，用切片 [已发长度:] 做 diff：只取还没发过的尾巴。
+        """
         delta = text[len("".join(tokens)) :]
         if delta:
             tokens.append(delta)
             on_token(delta)
 
+
+    """
+    1.第一次 redraw()（还没内容）
+
+    text = ""
+    tokens = [] → delta = "" → 不调用 on_token
+    
+    2.收到 "你"
+    text = "你"
+    已发 ""，delta = "你"
+    on_token("你")，tokens = ["你"]
+    
+    3.收到 "好"
+
+    text = "你好"
+    已发 "你"，长度 1，delta = "好"
+    on_token("好")，tokens = ["你", "好"]
+    """
+
+    """
+    执行顺序：
+
+    stream_assistant_text 收到 chunk，调用 redraw()
+    redraw() 调用 _on_update(...)
+    _on_update 调用 on_token("你")
+    on_token 写 stdout，返回
+    _on_update 返回
+    redraw() 返回
+    stream_assistant_text 继续等下一个 chunk
+    
+    """
     return asyncio.run(
         stream_assistant_text(
             graph,
@@ -149,6 +308,7 @@ def iter_assistant_text_sync(
             on_update=_on_update,
         )
     )
+
 
 
 def stream_assistant_reply(agent: Any, user_text: str, config: dict) -> None:
