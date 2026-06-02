@@ -186,30 +186,39 @@ with st.sidebar:
                 _delete_session(sid)
                 st.rerun()
 
+# 取当前的active 会话
 active = _active_session()
 messages = active["messages"]
 
-# 取当前会话与 chat input 
+# 取当前会话的 chat input 
 prompt = st.chat_input("输入消息…")
 
 if prompt:
     if not messages:
+        # 如果当前会话没有消息，则设置会话标题为 prompt 的前28个字符
         active["title"] = (prompt[:28] + "…") if len(prompt) > 28 else prompt
     messages.append({"role": "user", "content": prompt})
+    # 保存用户刚输入的prompt 到会话历史
     _save_session(st.session_state.active_session_id, active)
 
-# 渲染全部历史消息
+# 
 for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 if prompt:
+    # 获取 agent 实例
     graph = get_graph()
+
+    # 获取当前会话的配置
     cfg = _thread_config_for_active()
+
+    # 渲染 assistant 气泡
     with st.chat_message("assistant"):
         placeholder = st.empty()
         placeholder.markdown("思考中…")
 
+        # 定义一个回调函数，用于更新 assistant 气泡
         def _on_update(*, status: str | None, text: str, cursor: bool) -> None:
             _render_assistant_block(
                 placeholder,
@@ -218,6 +227,7 @@ if prompt:
                 cursor=cursor,
             )
 
+        # 流式输出 assistant 回复
         assistant_text = asyncio.run(
             stream_assistant_text(
                 graph,
@@ -226,7 +236,7 @@ if prompt:
                 on_update=_on_update,
             )
         )
-
+        # 如果 assistant 回复为空，则显示（无回复）
         if not assistant_text.strip():
             status = format_status_line(
                 pending_tool_names=[],
@@ -237,5 +247,7 @@ if prompt:
             if not status:
                 placeholder.markdown("（无回复）")
 
+    # 将 assistant 回复添加到会话历史
     messages.append({"role": "assistant", "content": assistant_text})
+    # 保存会话历史
     _save_session(st.session_state.active_session_id, active)
