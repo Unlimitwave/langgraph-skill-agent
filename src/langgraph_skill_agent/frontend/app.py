@@ -20,7 +20,11 @@ import streamlit as st
 
 from langgraph_skill_agent.agent_core import build_agent
 from langgraph_skill_agent.utility.paths import PROJECT_ROOT, VAR_DIR
-from langgraph_skill_agent.utility.streaming import format_status_line, stream_assistant_text
+from langgraph_skill_agent.utility.streaming import (
+    ToolResult,
+    format_status_line,
+    stream_assistant_text,
+)
 
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
 
@@ -33,19 +37,25 @@ def _render_assistant_block(
     *,
     status: str | None,
     text: str,
+    tool_results: list[ToolResult],
     cursor: bool,
 ) -> None:
     tail = "▌" if cursor else ""
-    if status and text.strip():
-        placeholder.markdown(f"{status}\n\n{text}{tail}")
-    elif status:
-        placeholder.markdown(f"{status}{tail}")
-    elif text.strip():
-        placeholder.markdown(f"{text}{tail}")
-    elif cursor:
-        placeholder.markdown(f"思考中…{tail}")
-    else:
-        placeholder.markdown("思考中…")
+    with placeholder.container():
+        if status and text.strip():
+            st.markdown(f"{status}\n\n{text}{tail}")
+        elif status:
+            st.markdown(f"{status}{tail}")
+        elif text.strip():
+            st.markdown(f"{text}{tail}")
+        elif cursor:
+            st.markdown(f"思考中…{tail}")
+        elif not tool_results:
+            st.markdown("思考中…")
+
+        for tr in tool_results:
+            with st.expander(f"🔧 工具 `{tr['name']}`", expanded=False):
+                st.code(tr["content"])
 
 
 # 确保目录存在
@@ -212,10 +222,21 @@ if prompt:
     # 保存用户刚输入的prompt 到会话历史
     _save_session(st.session_state.active_session_id, active)
 
+
+def _render_message_content(msg: dict) -> None:
+    st.markdown(msg["content"])
+    for tr in msg.get("tool_results") or []:
+        with st.expander(f"🔧 工具 `{tr['name']}`", expanded=False):
+            st.code(tr["content"])
+
+
 #
 for msg in messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg["role"] == "assistant":
+            _render_message_content(msg)
+        else:
+            st.markdown(msg["content"])
 
 if prompt:
     # 获取 agent 实例
@@ -230,16 +251,23 @@ if prompt:
         placeholder.markdown("思考中…")
 
         # 定义一个回调函数，用于更新 assistant 气泡
-        def _on_update(*, status: str | None, text: str, cursor: bool) -> None:
+        def _on_update(
+            *,
+            status: str | None,
+            text: str,
+            tool_results: list[ToolResult],
+            cursor: bool,
+        ) -> None:
             _render_assistant_block(
                 placeholder,
                 status=status,
                 text=text,
+                tool_results=tool_results,
                 cursor=cursor,
             )
 
         # 流式输出 assistant 回复
-        assistant_text = asyncio.run(
+        assistant_text, tool_results = asyncio.run(
             stream_assistant_text(
                 graph,
                 user_text=prompt,
@@ -248,7 +276,7 @@ if prompt:
             )
         )
         # 如果 assistant 回复为空，则显示（无回复）
-        if not assistant_text.strip():
+        if not assistant_text.strip() and not tool_results:
             status = format_status_line(
                 pending_tool_names=[],
                 tools_node_running=False,
@@ -259,6 +287,9 @@ if prompt:
                 placeholder.markdown("（无回复）")
 
     # 将 assistant 回复添加到会话历史
-    messages.append({"role": "assistant", "content": assistant_text})
+    assistant_msg: dict = {"role": "assistant", "content": assistant_text}
+    if tool_results:
+        assistant_msg["tool_results"] = tool_results
+    messages.append(assistant_msg)
     # 保存会话历史
     _save_session(st.session_state.active_session_id, active)

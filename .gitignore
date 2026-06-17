@@ -5,6 +5,7 @@
 .vscode/
 ._*
 var/
+deploy/volumes/
 dist/
 build/
 *.egg-info/

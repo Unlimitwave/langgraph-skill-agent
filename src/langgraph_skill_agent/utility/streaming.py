@@ -3,13 +3,57 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
 
+from langgraph_skill_agent.utility.logging_config import env_truthy
 from langgraph_skill_agent.utility.messages import stringify_message_content
+
+logger = logging.getLogger(__name__)
+
+_TOOL_TRACE_RESULT_MAX = 800
+
+
+class ToolResult(TypedDict):
+    name: str
+    content: str
+
+
+def _is_tool_message_chunk(message_chunk: object) -> bool:
+    return getattr(message_chunk, "type", None) == "tool"
+
+
+def _tool_trace(msg: str, *args: object) -> None:
+    if env_truthy("AGENT_TOOL_TRACE"):
+        logger.info("[TOOL_TRACE] " + msg, *args)
+
+
+def _log_tool_calls(message_chunk: object, seen: set[str]) -> None:
+    for tc in getattr(message_chunk, "tool_calls", None) or []:
+        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+        args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+        if not isinstance(name, str) or not name.strip() or not isinstance(args, dict):
+            continue
+        key = json.dumps({"name": name.strip(), "args": args}, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        _tool_trace("call %s args=%s", name.strip(), args)
+
+
+def _log_tool_result(message_chunk: object) -> None:
+    if getattr(message_chunk, "type", None) != "tool":
+        return
+    name = getattr(message_chunk, "name", None) or "?"
+    content = stringify_message_content(getattr(message_chunk, "content", None))
+    if len(content) > _TOOL_TRACE_RESULT_MAX:
+        content = content[:_TOOL_TRACE_RESULT_MAX] + "...(truncated)"
+    _tool_trace("result %s: %s", name, content)
 
 
 def tool_names_from_message_chunk(message_chunk: object) -> list[str]:
@@ -129,11 +173,13 @@ async def stream_assistant_text(
     user_text: str,
     config: dict,
     on_update: Callable[..., None] | None = None,
-) -> str:
+) -> tuple[str, list[ToolResult]]:
     buf: list[str] = []
+    tool_results: list[ToolResult] = []
     pending_tool_names: list[str] = []
     tools_depth = 0
     agent_depth = 0
+    seen_tool_calls: set[str] = set()
 
     def redraw(*, cursor: bool = True) -> None:
         body = "".join(buf)
@@ -144,7 +190,12 @@ async def stream_assistant_text(
             has_text=bool(body.strip()),
         )
         if on_update is not None:
-            on_update(status=status, text=body, cursor=cursor)
+            on_update(
+                status=status,
+                text=body,
+                tool_results=list(tool_results),
+                cursor=cursor,
+            )
 
     redraw()
 
@@ -196,6 +247,7 @@ async def stream_assistant_text(
                 if is_tools_node:
                     tools_depth = max(0, tools_depth - 1)
                     if tools_depth == 0:
+                        _tool_trace("tools node finished")
                         pending_tool_names = []
                 elif is_model_node:
                     agent_depth = max(0, agent_depth - 1)
@@ -203,6 +255,10 @@ async def stream_assistant_text(
             elif "triggers" in data and "input" in data:
                 if is_tools_node:
                     tools_depth += 1
+                    if pending_tool_names:
+                        _tool_trace("executing %s", ", ".join(pending_tool_names))
+                    else:
+                        _tool_trace("tools node started")
                 elif is_model_node:
                     agent_depth += 1
                 redraw()
@@ -215,12 +271,22 @@ async def stream_assistant_text(
         # 处理消息事件
         message_chunk, _meta = chunk["data"]
 
+        _log_tool_calls(message_chunk, seen_tool_calls)
+        _log_tool_result(message_chunk)
+
         names = tool_names_from_message_chunk(message_chunk)
         if names:
             pending_tool_names = names
-        # 将消息内容拼接成字符串
+
         piece = stringify_message_content(getattr(message_chunk, "content", None))
-        if piece:
+        if not piece:
+            redraw()
+            continue
+
+        if _is_tool_message_chunk(message_chunk):
+            name = getattr(message_chunk, "name", None) or "tool"
+            tool_results.append({"name": str(name), "content": piece})
+        else:
             buf.append(piece)
         redraw()
 
@@ -234,9 +300,10 @@ async def stream_assistant_text(
                 has_text=bool(text.strip()),
             ),
             text=text,
+            tool_results=list(tool_results),
             cursor=False,
         )
-    return text
+    return text, tool_results
 
 
 def iter_assistant_text_sync(
@@ -252,7 +319,14 @@ def iter_assistant_text_sync(
     """
     tokens: list[str] = []
 
-    def _on_update(*, status: str | None, text: str, cursor: bool) -> None:
+    def _on_update(
+        *,
+        status: str | None,
+        text: str,
+        cursor: bool,
+        tool_results: list[ToolResult] | None = None,
+    ) -> None:
+        del status, tool_results
         if on_token is None:
             return
 
@@ -295,7 +369,7 @@ def iter_assistant_text_sync(
     stream_assistant_text 继续等下一个 chunk
 
     """
-    return asyncio.run(
+    text, _ = asyncio.run(
         stream_assistant_text(
             graph,
             user_text=user_text,
@@ -303,6 +377,7 @@ def iter_assistant_text_sync(
             on_update=_on_update,
         )
     )
+    return text
 
 
 def stream_assistant_reply(agent: Any, user_text: str, config: dict) -> None:

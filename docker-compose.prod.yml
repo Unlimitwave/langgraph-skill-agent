@@ -1,0 +1,19 @@
+# Production / test-server overlay: pull immutable image from registry, do NOT build.
+#
+# Usage (after CI pushed IMAGE:TAG):
+#   export IMAGE=registry.example.com/langgraph-skill-agent
+#   export TAG=abc1234          # Git commit SHA (recommended, not latest)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Secrets: inject via .env on server or orchestrator secret store — never bake into image.
+
+services:
+  app:
+    build: !reset null
+    image: ${IMAGE:?set IMAGE registry path}:${TAG:?set TAG e.g. git SHA}
+    restart: always
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Production: remove host port binding if behind reverse proxy / ingress
+    ports:
+      - "${APP_PORT:-8501}:8501"
