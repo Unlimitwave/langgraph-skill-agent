@@ -5,10 +5,8 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional
 
 import requests
-from pydantic import PrivateAttr
 from llama_index.core import (  # type: ignore
     SimpleDirectoryReader,
     StorageContext,
@@ -18,6 +16,7 @@ from llama_index.core import (  # type: ignore
 from llama_index.core.embeddings import BaseEmbedding  # type: ignore
 from llama_index.core.retrievers import BaseRetriever, VectorIndexRetriever  # type: ignore
 from llama_index.core.vector_stores.types import VectorStoreQueryMode  # type: ignore
+from pydantic import PrivateAttr
 
 try:
     from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
@@ -28,7 +27,7 @@ except ImportError as e:  # pragma: no cover
 
 from langgraph_skill_agent.utility.paths import RAG_DATA_DIR, RAG_STORAGE_DIR
 
-_RAG_RETRIEVER: Optional[BaseRetriever] = None
+_RAG_RETRIEVER: BaseRetriever | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,7 @@ class RemoteOpenAICompatibleEmbedding(BaseEmbedding):
     def class_name(cls) -> str:
         return "RemoteOpenAICompatibleEmbedding"
 
-    def _embed(self, inputs: List[str]) -> List[List[float]]:
+    def _embed(self, inputs: list[str]) -> list[list[float]]:
         url = f"{self._base_url}/embeddings"  # base_url like http://host:port/v1
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -73,22 +72,22 @@ class RemoteOpenAICompatibleEmbedding(BaseEmbedding):
         )
         return [item["embedding"] for item in data]
 
-    def _get_text_embedding(self, text: str) -> List[float]:
+    def _get_text_embedding(self, text: str) -> list[float]:
         return self._embed([text])[0]
 
-    def _get_text_embedding_batch(self, texts: List[str], **kwargs) -> List[List[float]]:
+    def _get_text_embedding_batch(self, texts: list[str], **kwargs) -> list[list[float]]:
         return self._embed(texts)
 
-    def _get_query_embedding(self, query: str) -> List[float]:
+    def _get_query_embedding(self, query: str) -> list[float]:
         return self._embed([query])[0]
 
-    async def _aget_query_embedding(self, query: str) -> List[float]:
+    async def _aget_query_embedding(self, query: str) -> list[float]:
         return self._get_query_embedding(query)
 
-    async def _aget_text_embedding(self, text: str) -> List[float]:
+    async def _aget_text_embedding(self, text: str) -> list[float]:
         return self._get_text_embedding(text)
 
-    async def _aget_text_embedding_batch(self, texts: List[str], **kwargs) -> List[List[float]]:
+    async def _aget_text_embedding_batch(self, texts: list[str], **kwargs) -> list[list[float]]:
         return self._get_text_embedding_batch(texts, **kwargs)
 
 
@@ -187,9 +186,7 @@ def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
         return index
 
     if not data_dir.exists():
-        raise ValueError(
-            f"知识库目录不存在：{data_dir}（请创建并放入文档，或设置 RAG_DATA_DIR）"
-        )
+        raise ValueError(f"知识库目录不存在：{data_dir}（请创建并放入文档，或设置 RAG_DATA_DIR）")
 
     pdf_extractor = _build_pdf_file_extractor()
     t0 = time.perf_counter()
@@ -204,7 +201,9 @@ def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
 
     t1 = time.perf_counter()
     index = VectorStoreIndex.from_documents(docs, storage_context=sc, embed_model=embed_model)
-    _trace(f"VectorStoreIndex.from_documents took {time.perf_counter() - t1:.3f}s (n_docs={len(docs)})")
+    _trace(
+        f"VectorStoreIndex.from_documents took {time.perf_counter() - t1:.3f}s (n_docs={len(docs)})"
+    )
 
     t2 = time.perf_counter()
     index.storage_context.persist(persist_dir=str(storage_dir))

@@ -68,9 +68,7 @@ _PLANNER_SYSTEM = (
 def _invoke_planner_llm(goal: str) -> PlanModel | None:
     """普通 chat 输出 JSON，避免 DeepSeek 不支持 LangChain structured parse。"""
     llm = build_chat_model(streaming=False)
-    msg = llm.invoke(
-        [SystemMessage(content=_PLANNER_SYSTEM), HumanMessage(content=goal)]
-    )
+    msg = llm.invoke([SystemMessage(content=_PLANNER_SYSTEM), HumanMessage(content=goal)])
     raw = message_content_to_str(getattr(msg, "content", None))
     data = extract_first_json_object(raw)
     if not data:

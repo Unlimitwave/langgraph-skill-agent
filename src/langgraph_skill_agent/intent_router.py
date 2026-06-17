@@ -1,9 +1,9 @@
 """根据用户一句话判断是否适合走「显式 todo + 多步 Deep Agent」。"""
+
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field

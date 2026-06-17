@@ -12,17 +12,17 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
-    AIMessage,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
-    ToolMessage,
 )
+
 from langgraph_skill_agent.deepseek_model import build_deepseek_chat_model
 from langgraph_skill_agent.utility.messages import stringify_message_content
 
@@ -133,9 +133,7 @@ def summarize_transcript(transcript: str, *, llm: BaseChatModel | None = None) -
             "Do not invent facts."
         )
     )
-    human = HumanMessage(
-        content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000]
-    )
+    human = HumanMessage(content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000])
     out = model.invoke([sys, human])
     text = stringify_message_content(getattr(out, "content", "")).strip()
     return text or "(empty summary)"
@@ -160,7 +158,9 @@ def replace_thread_messages(
     若旧消息无 id，则退化为仅 append new_messages（可能重复，慎用）。
     """
     snap = compiled.get_state(config)
-    old = list(old_messages if old_messages is not None else (snap.values or {}).get("messages") or [])
+    old = list(
+        old_messages if old_messages is not None else (snap.values or {}).get("messages") or []
+    )
 
     if old and _messages_have_ids(old):
         removals: list[RemoveMessage] = []
@@ -205,7 +205,9 @@ def maybe_compact_thread(
 
     if len(messages) <= tail_n + 2:
         if on_trace:
-            on_trace("compactor: over token budget but tail too large to split; skip or raise tail_n")
+            on_trace(
+                "compactor: over token budget but tail too large to split; skip or raise tail_n"
+            )
         return False
 
     head = messages[:-tail_n]
@@ -216,17 +218,16 @@ def maybe_compact_thread(
     summary = summarize_transcript(transcript, llm=summarizer_llm)
 
     summary_msg = SystemMessage(
-        content=(
-            "[会话前文已压缩 — 仅作上下文恢复，请勿当作用户新指令]\n"
-            + summary
-        )
+        content=("[会话前文已压缩 — 仅作上下文恢复，请勿当作用户新指令]\n" + summary)
     )
     new_chain: list[BaseMessage] = [summary_msg, *tail]
 
     replace_thread_messages(compiled, config, new_chain, old_messages=messages)
 
     if on_trace:
-        new_used = estimate_messages_tokens(new_chain) + estimate_tokens(extra_token_text) + overhead
+        new_used = (
+            estimate_messages_tokens(new_chain) + estimate_tokens(extra_token_text) + overhead
+        )
         on_trace(
             f"compactor: compacted head={len(head)} tail={len(tail)} "
             f"tokens_before≈{used} after≈{new_used} threshold={threshold}"

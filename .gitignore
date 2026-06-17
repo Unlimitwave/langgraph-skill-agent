@@ -2,7 +2,7 @@
 ._.git
 .DS_Store
 ._.gitignore
-.vscode/*
+.vscode/
 ._*
 var/
 dist/
@@ -11,3 +11,4 @@ build/
 .venv/
 __pycache__/
 .pytest_cache/
+.ruff_cache/

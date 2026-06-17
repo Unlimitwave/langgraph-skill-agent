@@ -15,10 +15,8 @@ from langgraph_skill_agent.utility.messages import stringify_message_content
 def tool_names_from_message_chunk(message_chunk: object) -> list[str]:
     names: list[str] = []
 
-
     # 从消息中提取工具名称
     for tc in getattr(message_chunk, "tool_calls", None) or []:
-
         """
         message_chunk 中的toolcall 有2种，一种是完整的生成的toolcall，一种是分段的toolcall_chunks
 
@@ -104,7 +102,7 @@ def tool_names_from_message_chunk(message_chunk: object) -> list[str]:
         n = part.get("name") if isinstance(part, dict) else getattr(part, "name", None)
         if isinstance(n, str) and n.strip() and n.strip() not in names:
             names.append(n.strip())
-    
+
     return names
 
 
@@ -209,14 +207,13 @@ async def stream_assistant_text(
                     agent_depth += 1
                 redraw()
             continue
-        
+
         # 其他类型的事件，直接跳过
         if kind != "messages":
             continue
 
         # 处理消息事件
         message_chunk, _meta = chunk["data"]
-
 
         names = tool_names_from_message_chunk(message_chunk)
         if names:
@@ -249,7 +246,6 @@ def iter_assistant_text_sync(
     config: dict,
     on_token: Callable[[str], None] | None = None,
 ) -> str:
-
     """
     tokens 是记录已经通过 on_token 发出去的内容
 
@@ -269,18 +265,17 @@ def iter_assistant_text_sync(
             tokens.append(delta)
             on_token(delta)
 
-
     """
     1.第一次 redraw()（还没内容）
 
     text = ""
     tokens = [] → delta = "" → 不调用 on_token
-    
+
     2.收到 "你"
     text = "你"
     已发 ""，delta = "你"
     on_token("你")，tokens = ["你"]
-    
+
     3.收到 "好"
 
     text = "你好"
@@ -298,7 +293,7 @@ def iter_assistant_text_sync(
     _on_update 返回
     redraw() 返回
     stream_assistant_text 继续等下一个 chunk
-    
+
     """
     return asyncio.run(
         stream_assistant_text(
@@ -308,7 +303,6 @@ def iter_assistant_text_sync(
             on_update=_on_update,
         )
     )
-
 
 
 def stream_assistant_reply(agent: Any, user_text: str, config: dict) -> None:

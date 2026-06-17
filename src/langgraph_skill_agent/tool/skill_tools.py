@@ -79,7 +79,9 @@ def _validate_script_args(script_id: SkillScriptId, script_args: list[str] | Non
     return None
 
 
-def _resolve_registered_script(repo_root: Path, script_id: SkillScriptId) -> tuple[Path | None, str]:
+def _resolve_registered_script(
+    repo_root: Path, script_id: SkillScriptId
+) -> tuple[Path | None, str]:
     rel = _SKILL_SCRIPT_REGISTRY.get(script_id)
     if rel is None:
         return None, f"error: unknown script_id {script_id!r}"

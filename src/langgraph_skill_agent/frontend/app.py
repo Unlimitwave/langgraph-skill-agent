@@ -7,12 +7,13 @@ Streamlit 前端：调用 LangGraph Skill Agent。
   langgraph-ui
   # 或: streamlit run src/langgraph_skill_agent/frontend/app.py
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import streamlit as st
@@ -24,6 +25,7 @@ from langgraph_skill_agent.utility.streaming import format_status_line, stream_a
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
 
 # TODO (author:caoyintao): 2026-05-29 待检查整个模块，待测试
+
 
 # ui渲染，流式刷新 assistant 气泡
 def _render_assistant_block(
@@ -45,10 +47,12 @@ def _render_assistant_block(
     else:
         placeholder.markdown("思考中…")
 
+
 # 确保目录存在
 def _history_dir() -> Path:
     SESSION_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     return SESSION_HISTORY_DIR
+
 
 # 保存会话历史
 def _save_session(session_id: str, sess: dict) -> None:
@@ -57,9 +61,10 @@ def _save_session(session_id: str, sess: dict) -> None:
         "title": sess["title"],
         "thread_id": sess["thread_id"],
         "messages": sess["messages"],
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 # 加载会话历史
 def _load_sessions_from_disk() -> tuple[dict, str | None]:
@@ -80,10 +85,12 @@ def _load_sessions_from_disk() -> tuple[dict, str | None]:
     default_id = next(iter(sessions)) if sessions else None
     return sessions, default_id
 
+
 # 缓存 agent 实例
 @st.cache_resource
 def get_graph():
     return build_agent()
+
 
 # 初始化 session_state
 def _ensure_sessions():
@@ -104,6 +111,7 @@ def _ensure_sessions():
             st.session_state.active_session_id = tid
             _save_session(tid, st.session_state.sessions[tid])
 
+
 # TODO (author:caoyintao): 2026-06-01 待检查这部分
 def _active_session():
     _ensure_sessions()
@@ -112,6 +120,7 @@ def _active_session():
 
 def _thread_config_for_active():
     return {"configurable": {"thread_id": _active_session()["thread_id"]}}
+
 
 # 新建会话
 def _new_session():
@@ -123,6 +132,7 @@ def _new_session():
     }
     st.session_state.active_session_id = tid
     _save_session(tid, st.session_state.sessions[tid])
+
 
 # 删除会话
 def _delete_session(sid: str) -> None:
@@ -143,6 +153,7 @@ def _delete_session(sid: str) -> None:
         return
     if st.session_state.active_session_id == sid:
         st.session_state.active_session_id = next(iter(st.session_state.sessions.keys()))
+
 
 # 设置ui页面配置
 st.set_page_config(page_title="LangGraph Skill Agent", layout="wide")
@@ -190,7 +201,7 @@ with st.sidebar:
 active = _active_session()
 messages = active["messages"]
 
-# 取当前会话的 chat input 
+# 取当前会话的 chat input
 prompt = st.chat_input("输入消息…")
 
 if prompt:
@@ -201,7 +212,7 @@ if prompt:
     # 保存用户刚输入的prompt 到会话历史
     _save_session(st.session_state.active_session_id, active)
 
-# 
+#
 for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])

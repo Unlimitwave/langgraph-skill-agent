@@ -1,0 +1,36 @@
+# Install: make pre-commit-install
+# Run manually: make pre-commit
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: python-version-check
+        name: python version check (3.12.x)
+        entry: make python-check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest-unit
+        name: pytest unit tests
+        entry: make test
+        language: system
+        pass_filenames: false
+        always_run: true

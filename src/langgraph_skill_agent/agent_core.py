@@ -31,9 +31,17 @@ from langgraph_skill_agent.deepseek_model import (
     ChatDeepSeekWithReasoningPassback,
     build_deepseek_chat_model,
 )
-from langgraph_skill_agent.memory import load_agent_memory_blocks, maybe_compact_thread, save_conversation_snapshot
+from langgraph_skill_agent.memory import (
+    load_agent_memory_blocks,
+    maybe_compact_thread,
+    save_conversation_snapshot,
+)
 from langgraph_skill_agent.rag import _get_rag_retriever
-from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools, run_skill_script_in_docker
+from langgraph_skill_agent.tool import (
+    load_mcp_extra_tools,
+    make_host_skill_tools,
+    run_skill_script_in_docker,
+)
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
 
 logger = logging.getLogger(__name__)
@@ -53,7 +61,9 @@ def _content_to_str(content: Any) -> str:
                 parts.append(item)
             elif isinstance(item, dict):
                 text = item.get("text")
-                parts.append(text if isinstance(text, str) else json.dumps(item, ensure_ascii=False))
+                parts.append(
+                    text if isinstance(text, str) else json.dumps(item, ensure_ascii=False)
+                )
             else:
                 parts.append(str(item))
         return "\n".join(p for p in parts if p)
@@ -92,9 +102,10 @@ def rag_search(query: str) -> str:
     for i, nws in enumerate(results, start=1):
         node = getattr(nws, "node", None)
         text = (
-            (getattr(node, "get_content", None)() if node and hasattr(node, "get_content") else getattr(node, "text", ""))
-            or ""
-        )
+            getattr(node, "get_content", None)()
+            if node and hasattr(node, "get_content")
+            else getattr(node, "text", "")
+        ) or ""
         meta = getattr(node, "metadata", {}) or {}
         source = meta.get("file_path") or meta.get("source") or meta.get("filename") or ""
         page = meta.get("page_label") or meta.get("page") or meta.get("page_number") or ""
@@ -194,7 +205,7 @@ def main() -> None:
         if user_text.lower() in {"quit", "exit", "q"}:
             print("再见。")
             break
-        
+
         # 判断是否需要规划，读取.env中的ENABLE_PLAN_ROUTING配置
         if _plan_routing_enabled():
             from langgraph_skill_agent.intent_router import user_needs_plan_execute
@@ -209,6 +220,7 @@ def main() -> None:
         def _compact_trace(msg: str) -> None:
             if os.environ.get("RAG_TRACE", "").strip() in {"1", "true", "yes", "on"}:
                 logger.info("[COMPACT] %s", msg)
+
         # 根据上下文长度。如果上下文过长，压缩对话上下文
         maybe_compact_thread(agent, config, on_trace=_compact_trace)
         sys.stdout.write("助手: ")
