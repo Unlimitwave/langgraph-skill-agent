@@ -15,15 +15,23 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
+from langgraph.types import Command
 
 from langgraph_skill_agent.agent_core import build_agent
+from langgraph_skill_agent.utility.hitl import (
+    HitlRequest,
+    format_hitl_summary,
+    get_pending_hitl,
+    hitl_to_dict,
+)
 from langgraph_skill_agent.utility.paths import PROJECT_ROOT, VAR_DIR
 from langgraph_skill_agent.utility.streaming import (
     ToolResult,
     format_status_line,
-    stream_assistant_text,
+    run_assistant_turn,
 )
 
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
@@ -168,7 +176,9 @@ def _delete_session(sid: str) -> None:
 # 设置ui页面配置
 st.set_page_config(page_title="LangGraph Skill Agent", layout="wide")
 st.markdown("# LangGraph Skill Agent")
-st.caption("DeepSeek + Skills + RAG + MCP（内置 workspace_exec / run_skill_script 白名单）")
+st.caption(
+    "DeepSeek + Skills + RAG + MCP（内置 workspace_exec_python / run_skill_script_shell 白名单）"
+)
 
 _ensure_sessions()
 
@@ -212,15 +222,26 @@ active = _active_session()
 messages = active["messages"]
 
 # 取当前会话的 chat input
-prompt = st.chat_input("输入消息…")
+_hitl_block = st.session_state.get("hitl_pending")
+_hitl_active = isinstance(_hitl_block, dict) and _hitl_block.get("thread_id") == active["thread_id"]
+# session 与 checkpointer 不一致时（如审批已完成但未 rerun），自动解除锁定
+if _hitl_active:
+    _cfg = _thread_config_for_active()
+    if get_pending_hitl(get_graph(), _cfg) is None:
+        st.session_state.pop("hitl_pending", None)
+        st.rerun()
+prompt = st.chat_input("输入消息…", disabled=_hitl_active)
 
+prompt_accepted = False
 if prompt:
-    if not messages:
-        # 如果当前会话没有消息，则设置会话标题为 prompt 的前28个字符
-        active["title"] = (prompt[:28] + "…") if len(prompt) > 28 else prompt
-    messages.append({"role": "user", "content": prompt})
-    # 保存用户刚输入的prompt 到会话历史
-    _save_session(st.session_state.active_session_id, active)
+    if _hitl_active:
+        st.warning("请先批准或拒绝待处理的工具调用。")
+    else:
+        if not messages:
+            active["title"] = (prompt[:28] + "…") if len(prompt) > 28 else prompt
+        messages.append({"role": "user", "content": prompt})
+        _save_session(st.session_state.active_session_id, active)
+        prompt_accepted = True
 
 
 def _render_message_content(msg: dict) -> None:
@@ -230,27 +251,59 @@ def _render_message_content(msg: dict) -> None:
             st.code(tr["content"])
 
 
-#
-for msg in messages:
-    with st.chat_message(msg["role"]):
-        if msg["role"] == "assistant":
-            _render_message_content(msg)
-        else:
-            st.markdown(msg["content"])
+def _active_hitl_pending() -> dict[str, Any] | None:
+    pending = st.session_state.get("hitl_pending")
+    if not isinstance(pending, dict):
+        return None
+    if pending.get("thread_id") != _active_session()["thread_id"]:
+        return None
+    return pending
 
-if prompt:
-    # 获取 agent 实例
-    graph = get_graph()
 
-    # 获取当前会话的配置
-    cfg = _thread_config_for_active()
+def _clear_hitl_pending() -> None:
+    st.session_state.pop("hitl_pending", None)
 
-    # 渲染 assistant 气泡
+
+def _render_hitl_approval(pending: dict[str, Any]) -> None:
+    hitl = HitlRequest(
+        action_requests=pending.get("hitl", {}).get("action_requests") or [],
+        review_configs=pending.get("hitl", {}).get("review_configs") or [],
+    )
+    st.warning("以下工具调用需要你的审批后才能继续执行。")
+    st.markdown(format_hitl_summary(hitl))
+    n_actions = len(hitl.action_requests)
+    c1, c2 = st.columns(2)
+    if c1.button("✅ 批准", key="hitl_approve", use_container_width=True):
+        st.session_state.hitl_resume_decisions = [{"type": "approve"} for _ in range(n_actions)]
+        st.rerun()
+    if c2.button("❌ 拒绝", key="hitl_reject", use_container_width=True):
+        st.session_state.hitl_resume_decisions = [
+            {
+                "type": "reject",
+                "message": "用户拒绝了该工具调用，请勿重试除非用户明确要求。",
+            }
+            for _ in range(n_actions)
+        ]
+        st.rerun()
+
+
+def _run_assistant_and_persist(
+    *,
+    graph,
+    cfg: dict,
+    user_text: str = "",
+    graph_input: Any | None = None,
+    text_prefix: str = "",
+    tool_results_prefix: list[ToolResult] | None = None,
+) -> None:
+    active = _active_session()
+    messages = active["messages"]
+    had_hitl = _active_hitl_pending() is not None
+
     with st.chat_message("assistant"):
         placeholder = st.empty()
         placeholder.markdown("思考中…")
 
-        # 定义一个回调函数，用于更新 assistant 气泡
         def _on_update(
             *,
             status: str | None,
@@ -266,17 +319,31 @@ if prompt:
                 cursor=cursor,
             )
 
-        # 流式输出 assistant 回复
-        assistant_text, tool_results = asyncio.run(
-            stream_assistant_text(
+        turn = asyncio.run(
+            run_assistant_turn(
                 graph,
-                user_text=prompt,
+                user_text=user_text,
+                graph_input=graph_input,
                 config=cfg,
                 on_update=_on_update,
+                decide=None,
+                text_prefix=text_prefix,
+                tool_results_prefix=tool_results_prefix,
             )
         )
-        # 如果 assistant 回复为空，则显示（无回复）
-        if not assistant_text.strip() and not tool_results:
+
+        if turn.pending_hitl is not None:
+            st.session_state.hitl_pending = {
+                "thread_id": active["thread_id"],
+                "text": turn.text,
+                "tool_results": turn.tool_results,
+                "hitl": hitl_to_dict(turn.pending_hitl),
+            }
+            st.rerun()
+            return
+
+        _clear_hitl_pending()
+        if not turn.text.strip() and not turn.tool_results:
             status = format_status_line(
                 pending_tool_names=[],
                 tools_node_running=False,
@@ -286,10 +353,56 @@ if prompt:
             if not status:
                 placeholder.markdown("（无回复）")
 
-    # 将 assistant 回复添加到会话历史
-    assistant_msg: dict = {"role": "assistant", "content": assistant_text}
-    if tool_results:
-        assistant_msg["tool_results"] = tool_results
+    assistant_msg: dict = {"role": "assistant", "content": turn.text}
+    if turn.tool_results:
+        assistant_msg["tool_results"] = turn.tool_results
     messages.append(assistant_msg)
-    # 保存会话历史
     _save_session(st.session_state.active_session_id, active)
+    # chat_input 在脚本顶部已渲染；审批 resume 完成后需 rerun 才能解除 disabled
+    if had_hitl:
+        st.rerun()
+
+
+#
+for msg in messages:
+    with st.chat_message(msg["role"]):
+        if msg["role"] == "assistant":
+            _render_message_content(msg)
+        else:
+            st.markdown(msg["content"])
+
+resume_decisions = st.session_state.pop("hitl_resume_decisions", None)
+hitl_pending = _active_hitl_pending()
+
+if resume_decisions and hitl_pending:
+    graph = get_graph()
+    cfg = _thread_config_for_active()
+    _run_assistant_and_persist(
+        graph=graph,
+        cfg=cfg,
+        graph_input=Command(resume={"decisions": resume_decisions}),
+        text_prefix=hitl_pending.get("text") or "",
+        tool_results_prefix=hitl_pending.get("tool_results") or [],
+    )
+    st.stop()
+elif prompt_accepted:
+    graph = get_graph()
+    cfg = _thread_config_for_active()
+    _run_assistant_and_persist(
+        graph=graph,
+        cfg=cfg,
+        user_text=prompt,
+    )
+    st.stop()
+elif _active_hitl_pending():
+    hitl_pending = _active_hitl_pending()
+    with st.chat_message("assistant"):
+        pending_ph = st.empty()
+        _render_assistant_block(
+            pending_ph,
+            status="⏸ **等待审批**",
+            text=hitl_pending.get("text") or "",
+            tool_results=hitl_pending.get("tool_results") or [],
+            cursor=False,
+        )
+        _render_hitl_approval(hitl_pending)

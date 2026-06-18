@@ -10,7 +10,7 @@
 | 本地 Skills | `skills/` 目录下的 `SKILL.md` 定义可复用技能，Agent 按需加载 |
 | RAG 检索 | 本机 `var/data` 建索引；向量与 BM25 存远程 Milvus；混合检索（向量 + RRF） |
 | MCP 工具 | 可选接入 FastMCP 外部工具（`MCP_TOOLS=1`） |
-| Skill 脚本 | 支持本机 / Docker 隔离执行 `skills/` 下的 Python / Shell 脚本 |
+| Skill 脚本 | 支持本机执行 `skills/` 下的 Python / Shell 脚本（`workspace_exec_python` / `run_skill_script_shell`） |
 | 对话记忆 | 长期记忆块（`soul.md` / `user.md` / `Memory.md`）；CLI 支持上下文压缩与退出快照 |
 | 任务规划 | 复杂任务可走 `plan_execute` 外层图：规划 → 分步执行（CLI 可自动路由） |
 | Web UI | Streamlit 前端，流式输出；会话持久化到 `var/session_history/` |
@@ -63,7 +63,7 @@ langgrpah-skills/
 - **[uv](https://docs.astral.sh/uv/)** 包管理器（推荐）
 - **DeepSeek API Key**（必需）
 - **Milvus** + **Embedding 服务**（RAG 需要；通常为**独立远程服务**，见下方「RAG 部署」）
-- **Docker**（可选：打包 Streamlit 镜像；本地 Milvus 栈见 `docker-compose.milvus.yml`；Skill 脚本沙箱）
+- **Docker**（可选：打包 Streamlit 镜像；本地 Milvus 栈见 `docker-compose.milvus.yml`）
 
 ## 快速开始
 
@@ -215,7 +215,6 @@ make docker-up-milvus         # app + etcd + minio + milvus
 | `MILVUS_URI` | 默认从 `.env` 读取远程地址；仅 `make docker-up-milvus` 时覆盖为 `http://milvus:19530` |
 | `EMBED_BASE_URL` | 容器内 `127.0.0.1` 是容器自身；Embedding 在宿主机时用 `host.docker.internal`（Mac/Windows）或宿主机 IP |
 | RAG 文档 | app 使用 volume `app_var`（`/app/var`），不会自动挂载本机 `./var/data/`；需 bind mount 或把文档放进 volume |
-| Skill Docker 沙箱 | 默认未挂载 `docker.sock`；见 `docker-compose.yml` 注释（仅开发环境） |
 
 | 命令 | 作用 |
 |------|------|
@@ -287,7 +286,7 @@ description: 何时使用该技能的简短说明
 2. 步骤二
 ```
 
-如需执行脚本，可在 `skill_tools.py` 中注册脚本 ID，或使用 `run_skill_script_in_docker` 在 Docker 中运行 `skills/` 下的 Python 脚本。
+如需执行脚本，可在 `skill_tools.py` 中注册 shell 脚本 ID，或使用 `workspace_exec_python` 运行 `skills/` 下的 Python 脚本。
 
 ### 测试
 
@@ -310,7 +309,7 @@ make test-integration
                     ├─ Skills（skills/SKILL.md）
                     ├─ rag_search → 本机 var/data + var/storage + 远程 Milvus / Embedding
                     ├─ MCP 工具
-                    ├─ Skill 脚本（本机 / Docker）
+                    ├─ Skill 脚本（本机 workspace_exec_python / run_skill_script_shell）
                     └─ 文件系统 Backend（读写项目内文件）
 ```
 

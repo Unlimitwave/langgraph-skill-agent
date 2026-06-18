@@ -15,6 +15,11 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 
+# pystemmer (via llama-index-retrievers-bm25) compiles C extensions; slim base has no gcc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN uv sync --frozen --no-dev --extra ui --no-editable
 
 # --- runtime: minimal image, non-root user ---

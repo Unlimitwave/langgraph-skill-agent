@@ -37,11 +37,7 @@ from langgraph_skill_agent.memory import (
     save_conversation_snapshot,
 )
 from langgraph_skill_agent.rag import _get_rag_retriever
-from langgraph_skill_agent.tool import (
-    load_mcp_extra_tools,
-    make_host_skill_tools,
-    run_skill_script_in_docker,
-)
+from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
 
 logger = logging.getLogger(__name__)
@@ -147,7 +143,7 @@ def build_agent() -> Any:
     host_tools = make_host_skill_tools(PROJECT_ROOT)
 
     # 构建extra工具
-    extra_tools = [*host_tools, rag_search, run_skill_script_in_docker, *mcp_tools]
+    extra_tools = [*host_tools, rag_search, *mcp_tools]
 
     # 加载记忆块
     memory_block = load_agent_memory_blocks()
@@ -155,10 +151,9 @@ def build_agent() -> Any:
     # 构建系统提示
     system_prompt = f"""You are a helpful assistant, you can use the tools to help the user.
 When a skill asks to run a Python script under skills/:
-- Prefer run_skill_script_in_docker with path relative to skills/ (e.g. test-calc-script/run_calc.py).
-- Or workspace_exec with program python/python3 and argv_tail like ["skills/test-calc-script/run_calc.py"].
-For whitelisted skill shell scripts, use run_skill_script with a registered script_id (e.g. test-calc.run);
-never use workspace_exec with bash.
+- Use workspace_exec_python with program python/python3 and argv_tail like ["skills/test-calc-script/run_calc.py"].
+For whitelisted skill shell scripts, use run_skill_script_shell with a registered script_id (e.g. test-calc.run);
+never use workspace_exec_python with bash.
 
 The following files were loaded at session start and are authoritative for persona, user preferences, and long-term facts:
 {memory_block}
@@ -176,9 +171,8 @@ The following files were loaded at session start and are authoritative for perso
             "write_file": True,
             "read_file": False,
             "edit_file": True,
-            "run_skill_script_in_docker": False,
-            "workspace_exec": False,
-            "run_skill_script": False,
+            "workspace_exec_python": False,
+            "run_skill_script_shell": False,
         },
         system_prompt=system_prompt,
     )
