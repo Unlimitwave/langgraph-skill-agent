@@ -439,12 +439,17 @@ async def run_assistant_turn(
     """
     单次用户轮次：流式输出 + HITL interrupt 循环（Command(resume=...) 标准 resume）。
     decide 为 None 时遇到 interrupt 即停止并返回 pending_hitl（供 Streamlit 跨 rerun 审批）。
+
+    完整 CLI 时间线见同目录 streaming.md §B.5.2。
     """
+    # 首轮：payload=None → stream 注入 HumanMessage(user_text)
+    # resume 轮：payload=Command(resume=...) → 不再注入新用户消息
     payload = graph_input
     accumulated_text = text_prefix
     tool_results: list[ToolResult] = list(tool_results_prefix or [])
 
     while True:
+        # ① 跑一段 astream（messages + tasks）；跨 HITL 段用 prefix 拼接 UI 快照
         segment_text, segment_tools = await stream_assistant_text(
             graph,
             user_text=user_text if payload is None else "",
@@ -457,10 +462,12 @@ async def run_assistant_turn(
         accumulated_text = segment_text
         tool_results = segment_tools
 
+        # ② 段结束后读 checkpointer 权威 interrupt（不依赖 tasks chunk 里的 interrupts）
         pending = get_pending_hitl(graph, config)
         if pending is None:
             return AssistantTurnResult(text=accumulated_text, tool_results=tool_results)
 
+        # ③ Streamlit：无 decide，把 pending 交给 UI，跨 rerun 再 Command(resume=...)
         if decide is None:
             return AssistantTurnResult(
                 text=accumulated_text,
@@ -468,6 +475,7 @@ async def run_assistant_turn(
                 pending_hitl=pending,
             )
 
+        # ④ CLI：同步收集 decisions，下轮用 resume 续跑图（while 回到 ①）
         decisions = decide(pending)
         payload = Command(resume={"decisions": decisions})
         user_text = ""
