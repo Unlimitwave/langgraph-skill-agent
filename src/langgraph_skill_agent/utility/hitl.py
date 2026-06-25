@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, TypedDict
 
 
-# TODO 待阅读
+# TODO 待阅读 2026-06-22-16:00
 class HitlAction(TypedDict, total=False):
     name: str
     args: dict[str, Any]

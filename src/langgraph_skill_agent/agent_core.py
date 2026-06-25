@@ -24,7 +24,6 @@ from langchain.agents.middleware import before_model
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.runtime import Runtime
 
 from langgraph_skill_agent.deepseek_model import (
@@ -32,10 +31,14 @@ from langgraph_skill_agent.deepseek_model import (
     build_deepseek_chat_model,
 )
 from langgraph_skill_agent.memory import (
-    load_agent_memory_blocks,
     maybe_compact_thread,
+    persist_thread_snapshot,
+    prepare_thread_for_turn,
     save_conversation_snapshot,
 )
+from langgraph_skill_agent.memory.context import inject_context_before_model
+from langgraph_skill_agent.memory.pruning import slim_tool_output_middleware
+from langgraph_skill_agent.memory.session_store import create_checkpointer
 from langgraph_skill_agent.rag import _get_rag_retriever
 from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
@@ -81,9 +84,8 @@ def _normalize_messages_for_deepseek(state: dict) -> dict:
 
 
 @before_model(name="deepseek_normalize_messages")
-async def _deepseek_normalize_before_model(
-    state: AgentState, runtime: Runtime
-) -> dict[str, Any] | None:
+def _deepseek_normalize_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    del runtime
     return _normalize_messages_for_deepseek(dict(state))
 
 
@@ -145,19 +147,11 @@ def build_agent() -> Any:
     # 构建extra工具
     extra_tools = [*host_tools, rag_search, *mcp_tools]
 
-    # 加载记忆块
-    memory_block = load_agent_memory_blocks()
-
-    # 构建系统提示
-    system_prompt = f"""You are a helpful assistant, you can use the tools to help the user.
-When a skill asks to run a Python script under skills/:
-- Use workspace_exec_python with program python/python3 and argv_tail like ["skills/test-calc-script/run_calc.py"].
-For whitelisted skill shell scripts, use run_skill_script_shell with a registered script_id (e.g. test-calc.run);
-never use workspace_exec_python with bash.
-
-The following files were loaded at session start and are authoritative for persona, user preferences, and long-term facts:
-{memory_block}
-"""
+    # 静态 system_prompt 仅保留最小指引；分层上下文由 inject_context_before_model 每轮注入
+    system_prompt = (
+        "You are a helpful assistant. Follow the layered [CTX-SYSTEM] context in messages "
+        "for persona, memory, task state, and procedures."
+    )
 
     # 构建agent
     return create_deep_agent(
@@ -165,8 +159,12 @@ The following files were loaded at session start and are authoritative for perso
         backend=backend,
         tools=extra_tools,
         skills=["skills"],
-        checkpointer=MemorySaver(),
-        middleware=[_deepseek_normalize_before_model],
+        checkpointer=create_checkpointer(),
+        middleware=[
+            slim_tool_output_middleware,
+            inject_context_before_model,
+            _deepseek_normalize_before_model,
+        ],
         interrupt_on={
             "write_file": True,
             "read_file": False,
@@ -215,8 +213,12 @@ def main() -> None:
             if os.environ.get("RAG_TRACE", "").strip() in {"1", "true", "yes", "on"}:
                 logger.info("[COMPACT] %s", msg)
 
-        # 根据上下文长度。如果上下文过长，压缩对话上下文
-        maybe_compact_thread(agent, config, on_trace=_compact_trace)
+        prepare_thread_for_turn(
+            agent,
+            config,
+            compact_fn=maybe_compact_thread,
+            compact_kwargs={"on_trace": _compact_trace},
+        )
         sys.stdout.write("助手: ")
         sys.stdout.flush()
 
@@ -228,6 +230,10 @@ def main() -> None:
             on_token=lambda t: (sys.stdout.write(t), sys.stdout.flush()),
         )
         print()
+        try:
+            persist_thread_snapshot(agent, config)
+        except Exception as e:
+            logger.warning("导出 thread 快照失败: %s", e)
 
     try:
         p = save_conversation_snapshot(agent, config)

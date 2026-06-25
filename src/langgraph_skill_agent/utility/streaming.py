@@ -39,6 +39,16 @@ def _is_tool_message_chunk(message_chunk: object) -> bool:
     return getattr(message_chunk, "type", None) == "tool"
 
 
+def _is_assistant_message_chunk(message_chunk: object) -> bool:
+    """仅累积模型正文；System / Human 等注入层 chunk 不应进入 UI 气泡。"""
+    if _is_tool_message_chunk(message_chunk):
+        return False
+    msg_type = str(getattr(message_chunk, "type", "") or "")
+    if msg_type in {"human", "HumanMessageChunk", "system", "SystemMessageChunk"}:
+        return False
+    return msg_type in {"ai", "AIMessageChunk"}
+
+
 def _tool_trace(msg: str, *args: object) -> None:
     if env_truthy("AGENT_TOOL_TRACE"):
         logger.info("[TOOL_TRACE] " + msg, *args)
@@ -241,7 +251,8 @@ async def stream_assistant_text(
     payload = (
         graph_input if graph_input is not None else {"messages": [HumanMessage(content=user_text)]}
     )
-    async for chunk in graph.astream(
+    # 使用 sync stream：SqliteSaver 不支持 astream；middleware 已为 sync before_model。
+    for chunk in graph.stream(
         payload,
         config=config,
         stream_mode=["messages", "tasks"],
@@ -400,11 +411,11 @@ async def stream_assistant_text(
             redraw()
             continue
 
-        # ③b 有 content：ToolMessage 进 tool_results，AIMessage 进 buf（不进 stdout 的正文分离）
+        # ③b 有 content：ToolMessage 进 tool_results，AIMessage 进 buf
         if _is_tool_message_chunk(message_chunk):
             name = getattr(message_chunk, "name", None) or "tool"
             tool_results.append({"name": str(name), "content": piece})
-        else:
+        elif _is_assistant_message_chunk(message_chunk):
             buf.append(piece)
         redraw()
 

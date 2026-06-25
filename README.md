@@ -13,7 +13,7 @@
 | Skill 脚本 | 支持本机执行 `skills/` 下的 Python / Shell 脚本（`workspace_exec_python` / `run_skill_script_shell`） |
 | 对话记忆 | 长期记忆块（`soul.md` / `user.md` / `Memory.md`）；CLI 支持上下文压缩与退出快照 |
 | 任务规划 | 复杂任务可走 `plan_execute` 外层图：规划 → 分步执行（CLI 可自动路由） |
-| Web UI | Streamlit 前端，流式输出；会话持久化到 `var/session_history/` |
+| Web UI | Streamlit 前端，流式输出；对话状态存 Postgres checkpointer，侧边栏索引在 `var/session_history/` |
 
 ## 项目结构
 
@@ -48,11 +48,13 @@ langgrpah-skills/
 │   ├── session_history/           # Web UI 会话 JSON
 │   ├── data/                      # RAG 原始文档（建索引前需手动创建并放入文件）
 │   └── storage/                   # LlamaIndex 本地元数据缓存（向量在 Milvus）
+├── deploy/
+│   └── postgres/                  # Postgres 分库初始化脚本
 ├── .env.example                   # 环境变量模板
 ├── Dockerfile                     # Streamlit 运行时镜像（标准制品）
 ├── docker-compose.yml             # 默认：仅 app（连 .env 远程 Milvus）
 ├── docker-compose.milvus.yml      # 可选 overlay：本地 Milvus 栈
-├── docker-compose.prod.yml        # 生产 overlay：仅拉 Registry 镜像
+├── docker-compose.prod.yml        # 生产 / 本地全栈 overlay：Postgres + 分库 checkpointer
 ├── Makefile                       # 跨层命令编排（lint / test / build / docker）
 └── pyproject.toml                 # 项目配置与 CLI 入口
 ```
@@ -99,8 +101,15 @@ cp .env.example .env
 | `AGENT_TOOL_TRACE` | `1` 输出 Agent 工具调用调试日志，`0` 关闭 |
 | `MCP_TOOLS` | `1` 启用 MCP 工具，`0` 关闭 |
 | `ENABLE_PLAN_ROUTING` | `1` 启用 **CLI** 自动路由到规划流程 |
-| `COMPACT_ENABLED` | `1` 启用 **CLI** 上下文压缩（默认开启） |
+| `COMPACT_ENABLED` | `1` 启用 **CLI** 跨轮 LLM 摘要压缩（默认开启） |
+| `CONTEXT_WINDOW` | 模型上下文窗口 token 数（默认 `128000`）；compactor / 裁剪瀑布共用 |
+| `CONTEXT_RESERVE_TOKENS` | 预留给本轮回复 + 工具输出（默认 `8000`） |
 | `THREAD_ID` | CLI 会话线程 ID |
+| `CHECKPOINT_BACKEND` | checkpointer 类型：`postgres`（默认）/ `sqlite` / `memory` |
+| `POSTGRES_URI` | 裸机 `run-ui` / `run-agent` 的 Postgres 连接串（库名见下方「Checkpointer」） |
+| `POSTGRES_DB_DOCKER` | Docker app 使用的 database，默认 `langgraph_docker` |
+| `POSTGRES_DB_LOCAL` | 裸机 UI 使用的 database，默认 `langgraph_local` |
+| `POSTGRES_PASSWORD` | Postgres 用户密码（`docker-stack-up` 必需） |
 
 完整选项见 [`.env.example`](.env.example)。
 
@@ -138,21 +147,86 @@ make run-ui   # 或 make run-agent
 
 ### 4. 启动应用
 
-**Web UI（推荐）：**
+Web UI 与 CLI 默认使用 **Postgres checkpointer** 持久化 LangGraph 对话状态。本地开发常见两种跑法：**裸机改代码** 或 **Docker 全栈**；二者共用 **一个 Postgres 容器、两个 database**，数据互不干扰。
 
-```bash
-make run-ui
-# 浏览器访问 http://localhost:8501
+#### Checkpointer 与 Postgres 分库
+
+| 概念 | 说明 |
+|------|------|
+| Postgres **实例** | 一个 `postgres:16-alpine` 容器，监听 `127.0.0.1:5432`（供裸机连接） |
+| **database** | 同一实例内的逻辑库；Docker UI 与裸机 UI 各用一库 |
+| `langgraph_docker` | Docker 内 Streamlit app 的 checkpoint（compose 自动配置） |
+| `langgraph_local` | 裸机 `make run-ui` / `make run-agent` 的 checkpoint（`.env` 中 `POSTGRES_URI`） |
+| `var/session_history/` | 仅存侧边栏标题与 `thread_id`；**聊天气泡内容以 checkpointer 为准** |
+
+连接串示例（库名在最后一段）：
+
+```text
+postgresql://langgraph:密码@localhost:5432/langgraph_local
+                                              ↑ database 名
 ```
 
-**CLI 交互式 Agent：**
+无 Postgres 时可改 `.env`：`CHECKPOINT_BACKEND=sqlite` 或 `memory`（见 `.env.example`）。
+
+#### 方式 A：裸机 UI / CLI（改代码即时生效，推荐日常开发）
+
+**1. 先起 Postgres（可后台常驻）：**
 
 ```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d postgres
+```
+
+**初次搭环境或旧 pg 卷可能缺库时**（只需一次，或不确定时跑一下），再执行：
+
+```bash
+make postgres-init-dbs    # 幂等：库已存在则 skip，不会重复创建
+```
+
+> **不必每次启动都跑。** 全新 `pg_data` 卷首次 `up postgres` 时，`init-databases.sh` 会自动建 `langgraph_local`（`langgraph_docker` 由 `POSTGRES_DB` 创建）。日常开发只要 Postgres 在跑、数据卷未删，直接 `make run-ui` 即可；容器 stop/start 或重启电脑后，库仍在 `pg_data` 里。
+
+**2. 启动 UI 或 CLI：**
+
+```bash
+make run-ui               # http://localhost:8501
+# 或
 make run-agent
-# 输入 quit / exit / q 退出
 ```
 
-**多步任务规划：**
+`.env` 需包含（示例见 `.env.example`）：
+
+```bash
+CHECKPOINT_BACKEND=postgres
+POSTGRES_URI=postgresql://langgraph:你的密码@localhost:5432/langgraph_local
+```
+
+若 Docker app 已占用 8501，可停掉 app 或换端口：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app
+make run-ui
+# 或：uv run langgraph-ui -- --server.port 8502
+```
+
+#### 方式 B：Docker 全栈 UI（接近部署环境）
+
+```bash
+make docker-stack-up
+# 自动：Postgres + 建库 + 构建并启动 app
+# 浏览器 http://localhost:8501
+```
+
+Docker app 使用 compose 内配置的 `@postgres:5432/langgraph_docker`，**无需**改 `.env` 里的 `POSTGRES_URI`。
+
+| 命令 | 作用 |
+|------|------|
+| `make docker-stack-up` | Postgres + app（分库隔离，推荐本地全栈） |
+| `make postgres-init-dbs` | 幂等补建两库（**仅初次/旧卷/不确定时**；日常不必重复） |
+| `make docker-logs` | 查看 app 日志 |
+| `make docker-down` | 停止 compose 服务 |
+
+**方式 A 与 B 可同时运行**（不同 database，checkpoint 不冲突）；但 **8501 端口只能给一个 UI**，另一个需停 app 或改用 8502。
+
+**多步任务规划**（与 UI 入口无关）：
 
 ```bash
 uv run langgraph-plan "调研某主题并写一份总结文档"
@@ -172,7 +246,7 @@ uv run langgraph-summary --dry-run      # 预览，不写文件
 |------|---------------------------|-------------------------|
 | 上下文压缩 `compactor` | ✅ 每轮对话前自动压缩 | ❌ 未接入 |
 | 规划自动路由 `ENABLE_PLAN_ROUTING` | ✅ 可开启 | ❌ 未接入；复杂任务请用 `langgraph-plan` |
-| 会话持久化 | 退出时写入 `var/conversation_history/` | 实时写入 `var/session_history/*.json` |
+| 会话持久化 | 退出时写入 `var/conversation_history/` | checkpointer（Postgres 等）+ 侧边栏索引 `var/session_history/*.json` |
 | `langgraph-summary` | ✅ 使用 CLI 快照 | ❌ UI 会话需手动转换格式后才可用 |
 
 长期记忆块（`var/agent_memory/*.md`）两种入口共用；摘要从 CLI 快照更新是推荐工作流。
@@ -188,9 +262,11 @@ uv run langgraph-summary --dry-run      # 预览，不写文件
 | `langgraph-plan` | 多步规划 + 分步执行 |
 | `langgraph-summary` | 从对话快照更新记忆文件 |
 
-## Docker 部署（Phase 1）
+## Docker 部署
 
-**默认用法（远程 Milvus）**——compose 只启动 Streamlit app，Milvus / Embedding 地址完全由 `.env` 决定：
+### 仅 app（远程 Milvus，无 Postgres checkpointer）
+
+compose 只启动 Streamlit app；checkpointer 仍读 `.env`（若 `CHECKPOINT_BACKEND=postgres` 需自行提供可达的 Postgres，或改为 `sqlite`）：
 
 ```bash
 cp .env.example .env
@@ -201,7 +277,28 @@ make docker-logs
 make docker-down
 ```
 
-**可选：本地 Milvus 栈**（无远程实例、全本机联调时）：
+### 本地全栈：app + Postgres（推荐，checkpointer 分库）
+
+```bash
+cp .env.example .env
+# 填写 DEEPSEEK_API_KEY、POSTGRES_PASSWORD 等
+make docker-stack-up          # Postgres + 建库 + app；PG 映射 127.0.0.1:5432
+# 浏览器 http://localhost:8501  （Docker UI → langgraph_docker）
+make docker-logs
+make docker-down
+```
+
+裸机调试时可只起 Postgres，与 Docker UI 共用实例、不同库：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d postgres
+# 仅初次或旧 pg 卷缺库时：make postgres-init-dbs
+make run-ui                   # 裸机 UI → langgraph_local
+```
+
+### 可选：本地 Milvus 栈
+
+无远程 Milvus、全本机联调时：
 
 ```bash
 make docker-up-milvus         # app + etcd + minio + milvus
@@ -218,11 +315,13 @@ make docker-up-milvus         # app + etcd + minio + milvus
 
 | 命令 | 作用 |
 |------|------|
-| `make docker-up` | 仅 app（远程 Milvus） |
+| `make docker-up` | 仅 app（远程 Milvus；无 compose 内 Postgres） |
+| `make docker-stack-up` | app + Postgres（分库 checkpointer，本地全栈推荐） |
+| `make postgres-init-dbs` | 幂等补建两库（**仅初次/旧卷/不确定时**；`docker-stack-up` 会自动调用） |
 | `make docker-up-milvus` | app + 本地 Milvus 栈 |
 | `make docker-build` | 仅构建镜像 `langgraph-skill-agent:local` |
 | `make build` | Python wheel 到 `dist/` |
-| `make docker-prod-up` | 生产：拉 Registry 镜像（需 `IMAGE` + `TAG`） |
+| `make docker-prod-up` | 生产：拉 Registry 镜像 + Postgres（需 `IMAGE` + `TAG`） |
 
 **制品标签**：生产部署请用 Git commit SHA，不要用 `latest`：
 
@@ -240,13 +339,13 @@ make docker-prod-up IMAGE=$IMAGE TAG=$TAG
 |--------|----------|------|
 | Makefile 跨层编排 | ✅ | `lint` / `test` / `build` / `docker-*` / `check` |
 | 多阶段 Dockerfile + 非 root | ✅ | uv 构建，Streamlit 8501 |
-| docker-compose 多环境 | ✅ | 默认 app only + 可选 `docker-compose.milvus.yml` + 生产 overlay |
+| docker-compose 多环境 | ✅ | 默认 app only + 可选 Milvus + `docker-compose.prod.yml`（Postgres） |
 | `/health` FastAPI 探针 | ❌ | 使用 Streamlit 内置 `/_stcore/health` |
-| Alembic `make migrate` | ❌ | 无关系型 DB 迁移 |
+| LangGraph Postgres checkpointer | ✅ | 默认 `postgres`；Docker / 裸机分库（`langgraph_docker` / `langgraph_local`） |
+| Alembic `make migrate` | ❌ | checkpoint 表由 `PostgresSaver.setup()` 自动迁移 |
 | mypy `make typecheck` | ⏸ | Phase 0 未引入，后续可加 |
-| Compose 内 PostgreSQL | ❌ | 向量库为 Milvus；默认连远程，本地栈见 `docker-compose.milvus.yml` |
 
-本地 Milvus 栈数据在 `deploy/volumes/`（gitignore）。应用运行时数据在 Docker volume `app_var`（`/app/var`）。**远程 Milvus 数据由你的集群自行持久化**，与本仓库 volume 无关。
+本地 Milvus 栈数据在 `deploy/volumes/`（gitignore）。Postgres 数据在 Docker volume `pg_data`；应用运行时数据在 `app_var`（`/app/var`）。**远程 Milvus 数据由你的集群自行持久化**，与本仓库 volume 无关。
 
 ## 开发
 
@@ -265,7 +364,11 @@ make test-integration   # 集成测试（需 Milvus 在线）
 make build              # Python wheel 打包
 make docker-build       # 构建 Docker 镜像
 make docker-up          # Docker 启动 app（远程 Milvus）
+make docker-stack-up    # Docker 启动 app + Postgres（checkpointer 分库）
+make postgres-init-dbs  # 幂等补建两库（仅初次/旧卷/不确定时）
 make docker-up-milvus   # Docker 启动 app + 本地 Milvus（可选）
+make run-ui             # 裸机 Streamlit（需 Postgres 容器 + langgraph_local）
+make run-agent          # 裸机 CLI
 make pre-commit         # 手动跑全部 pre-commit 检查
 ```
 
@@ -314,7 +417,7 @@ make test-integration
 ```
 
 - **CLI**：每轮前 `compactor` 压缩上下文；退出时快照 → `var/conversation_history/` → 可跑 `langgraph-summary`。
-- **Web UI**：无 compactor / 规划路由；会话 → `var/session_history/`。
+- **Web UI**：无 compactor / 规划路由；对话 checkpoint → Postgres（或 sqlite/memory）；侧边栏索引 → `var/session_history/`。
 
 ## License
 

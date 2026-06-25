@@ -6,7 +6,8 @@
 
 .PHONY: help install lint format test test-integration run-ui run-agent \
 	python-check pre-commit-install pre-commit check clean \
-	build docker-build docker-up docker-up-milvus docker-down docker-logs docker-prod-up
+	build docker-build docker-up docker-up-milvus docker-down docker-logs \
+	docker-stack-up docker-prod-up postgres-init-dbs
 
 COMPOSE_FILES = -f docker-compose.yml
 COMPOSE_MILVUS = $(COMPOSE_FILES) -f docker-compose.milvus.yml
@@ -79,8 +80,18 @@ docker-down: ## 停止 compose 容器（含可选 Milvus 栈）
 docker-logs: ## 跟踪 app 容器日志
 	docker compose logs -f app
 
+docker-stack-up: ## 本地全栈：app + Postgres（docker/local 分库，PG 映射 127.0.0.1:5432）
+	docker compose $(COMPOSE_FILES) -f docker-compose.prod.yml up -d --build
+	@$(MAKE) postgres-init-dbs
+	@docker compose $(COMPOSE_FILES) -f docker-compose.prod.yml up -d app
+
+postgres-init-dbs: ## 幂等创建 langgraph_docker / langgraph_local 隔离库
+	@chmod +x deploy/postgres/ensure-databases.sh deploy/postgres/init-databases.sh
+	@./deploy/postgres/ensure-databases.sh
+
 docker-prod-up: ## 生产/测试服：仅拉 Registry 镜像（需 IMAGE + TAG）
 	docker compose $(COMPOSE_FILES) -f docker-compose.prod.yml up -d
+	@$(MAKE) postgres-init-dbs
 
 # ---------------------------------------------------------------------------
 # 运行应用（裸机 / 虚拟环境）

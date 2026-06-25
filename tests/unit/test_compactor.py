@@ -9,6 +9,7 @@ from langgraph_skill_agent.memory.compactor import (
     estimate_tokens,
     should_compact,
 )
+from langgraph_skill_agent.memory.context import ContextBudget
 
 
 def test_estimate_tokens_empty_and_non_empty() -> None:
@@ -29,11 +30,22 @@ def test_compaction_enabled_respects_env(monkeypatch) -> None:
     assert compaction_enabled() is True
 
 
-def test_effective_budget_tokens_defaults() -> None:
+def test_effective_budget_tokens_defaults(monkeypatch) -> None:
+    for name in (
+        "CONTEXT_WINDOW",
+        "CONTEXT_INPUT_BUDGET_RATIO",
+        "CONTEXT_SYSTEM_BUDGET_RATIO",
+        "CONTEXT_RESERVE_TOKENS",
+        "COMPACT_MAX_CONTEXT_TOKENS",
+        "COMPACT_RESERVE_TOKENS",
+        "COMPACT_SYSTEM_OVERHEAD_TOKENS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    budget = ContextBudget.from_env()
     max_ctx, reserve, overhead = effective_budget_tokens()
-    assert max_ctx == 60_000
+    assert max_ctx == budget.input_budget
     assert reserve == 8_000
-    assert overhead == 3_500
+    assert overhead == budget.system_budget
 
 
 def test_should_compact_disabled(monkeypatch) -> None:
