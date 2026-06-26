@@ -24,6 +24,7 @@ from langgraph_skill_agent.utility.hitl import (
 )
 from langgraph_skill_agent.utility.logging_config import env_truthy
 from langgraph_skill_agent.utility.messages import stringify_message_content
+from langgraph_skill_agent.utility.tenant import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,7 @@ async def stream_assistant_text(
     user_text: str = "",
     graph_input: Any | None = None,
     config: dict,
+    context: AgentContext,
     on_update: Callable[..., None] | None = None,
     text_prefix: str = "",
     tool_results_prefix: list[ToolResult] | None = None,
@@ -255,6 +257,7 @@ async def stream_assistant_text(
     for chunk in graph.stream(
         payload,
         config=config,
+        context=context,
         stream_mode=["messages", "tasks"],
         version="v2",
     ):
@@ -442,6 +445,7 @@ async def run_assistant_turn(
     user_text: str = "",
     graph_input: Any | None = None,
     config: dict,
+    context: AgentContext,
     on_update: Callable[..., None] | None = None,
     decide: Callable[[HitlRequest], list[dict[str, Any]]] | None = None,
     text_prefix: str = "",
@@ -466,6 +470,7 @@ async def run_assistant_turn(
             user_text=user_text if payload is None else "",
             graph_input=payload,
             config=config,
+            context=context,
             on_update=on_update,
             text_prefix=accumulated_text,
             tool_results_prefix=tool_results,
@@ -497,6 +502,7 @@ def iter_assistant_text_sync(
     *,
     user_text: str,
     config: dict,
+    context: AgentContext,
     on_token: Callable[[str], None] | None = None,
 ) -> str:
     """
@@ -560,6 +566,7 @@ def iter_assistant_text_sync(
             graph,
             user_text=user_text,
             config=config,
+            context=context,
             on_update=_on_update,
             decide=prompt_hitl_decisions_cli,
         )
@@ -567,13 +574,16 @@ def iter_assistant_text_sync(
     return turn.text
 
 
-def stream_assistant_reply(agent: Any, user_text: str, config: dict) -> None:
+def stream_assistant_reply(
+    agent: Any, user_text: str, config: dict, *, context: AgentContext
+) -> None:
     sys.stdout.write("助手: ")
     sys.stdout.flush()
     iter_assistant_text_sync(
         agent,
         user_text=user_text,
         config=config,
+        context=context,
         on_token=lambda t: (sys.stdout.write(t), sys.stdout.flush()),
     )
     sys.stdout.write("\n")

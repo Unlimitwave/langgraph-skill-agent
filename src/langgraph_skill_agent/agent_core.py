@@ -18,7 +18,6 @@ import sys
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.backends.filesystem import FilesystemBackend
 from dotenv import load_dotenv
 from langchain.agents.middleware import before_model
 from langchain.agents.middleware.types import AgentState
@@ -42,6 +41,13 @@ from langgraph_skill_agent.memory.session_store import create_checkpointer
 from langgraph_skill_agent.rag import _get_rag_retriever
 from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
+from langgraph_skill_agent.utility.agent_policy import (
+    agent_filesystem_permissions,
+    agent_skill_sources,
+    backend_for_runtime,
+)
+from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
+from langgraph_skill_agent.utility.tenant import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,9 @@ def _normalize_messages_for_deepseek(state: dict) -> dict:
 
 
 @before_model(name="deepseek_normalize_messages")
-def _deepseek_normalize_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+def _deepseek_normalize_before_model(
+    state: AgentState, runtime: Runtime[AgentContext]
+) -> dict[str, Any] | None:
     del runtime
     return _normalize_messages_for_deepseek(dict(state))
 
@@ -126,40 +134,33 @@ def _plan_routing_enabled() -> bool:
     return os.environ.get("ENABLE_PLAN_ROUTING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def build_agent() -> Any:
-    # 配置全局的logging配置
+def build_agent_graph() -> Any:
+    """编译单图（无租户绑定）；身份在 invoke 时通过 AgentContext 注入。"""
     configure_logging()
-
-    # 构建模型
     model = build_deepseek_chat_model(streaming=True)
-    backend = FilesystemBackend(root_dir=str(PROJECT_ROOT), virtual_mode=True)
 
-    # 加载MCP工具
     try:
         mcp_tools = load_mcp_extra_tools()
     except Exception as e:
         logger.warning("MCP 工具加载失败，已跳过: %s", e)
         mcp_tools = []
 
-    # 构建host工具
-    host_tools = make_host_skill_tools(PROJECT_ROOT)
-
-    # 构建extra工具
+    host_tools = make_host_skill_tools()
     extra_tools = [*host_tools, rag_search, *mcp_tools]
 
-    # 静态 system_prompt 仅保留最小指引；分层上下文由 inject_context_before_model 每轮注入
     system_prompt = (
         "You are a helpful assistant. Follow the layered [CTX-SYSTEM] context in messages "
         "for persona, memory, task state, and procedures."
     )
 
-    # 构建agent
     return create_deep_agent(
         model=model,
-        backend=backend,
+        backend=backend_for_runtime,
         tools=extra_tools,
-        skills=["skills"],
+        skills=agent_skill_sources(),
+        permissions=agent_filesystem_permissions(),
         checkpointer=create_checkpointer(),
+        context_schema=AgentContext,
         middleware=[
             slim_tool_output_middleware,
             inject_context_before_model,
@@ -176,16 +177,39 @@ def build_agent() -> Any:
     )
 
 
-def main() -> None:
-    # 构建agent
-    agent = build_agent()
+def build_agent(*, force_rebuild: bool = False) -> Any:
+    """返回 compiled graph（单图多租户）。推荐用 get_agent_runtime().graph。"""
+    # 通俗写法，便于理解：先获取 runtime，再取它的 graph 属性
+    runtime = get_agent_runtime(force_rebuild=force_rebuild)
+    agent_graph = runtime.graph
+    return agent_graph
 
-    # 设置线程ID
+
+def main() -> None:
+    # 构建runtime,其中runtime会构建基础的graph
+    runtime = get_agent_runtime()
+    agent = runtime.graph
     thread_id = os.environ.get("THREAD_ID", "demo-thread-1")
-    config = {"configurable": {"thread_id": thread_id}}
+    invoke = runtime.invoke_kwargs(thread_id=thread_id)
+
+    """
+    默认invoke_kwargs返回的是:
+    {
+    "context": AgentContext(user_id="default", tenant_id="default"),  # 除非设了环境变量
+    "config": {
+        "configurable": {
+        "thread_id": "default__demo-thread-1",  # user_id + "__" + thread_id
+        "user_id": "default",
+        "tenant_id": "default",
+        }
+    }
+    }
+    """
+
+    config = invoke["config"]
+    context = invoke["context"]
     print("持续对话（quit / exit / q 退出）\n")
 
-    # 持续对话
     while True:
         try:
             user_text = input("你: ").strip()
@@ -198,7 +222,6 @@ def main() -> None:
             print("再见。")
             break
 
-        # 判断是否需要规划，读取.env中的ENABLE_PLAN_ROUTING配置
         if _plan_routing_enabled():
             from langgraph_skill_agent.intent_router import user_needs_plan_execute
             from langgraph_skill_agent.plan_execute import run_macro_task
@@ -222,11 +245,11 @@ def main() -> None:
         sys.stdout.write("助手: ")
         sys.stdout.flush()
 
-        # 请求模型并流式回答
         iter_assistant_text_sync(
             agent,
             user_text=user_text,
             config=config,
+            context=context,
             on_token=lambda t: (sys.stdout.write(t), sys.stdout.flush()),
         )
         print()

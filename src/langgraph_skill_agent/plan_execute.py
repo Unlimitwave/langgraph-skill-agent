@@ -27,9 +27,11 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from langgraph_skill_agent.agent_core import build_agent, build_chat_model
+from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
 from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
 from langgraph_skill_agent.utility.logging_config import configure_logging
 from langgraph_skill_agent.utility.streaming import stream_assistant_reply
+from langgraph_skill_agent.utility.tenant import normalize_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +162,17 @@ def build_executor_node(agent):
             ]
         )
         prompt = "\n".join(lines)
-        step_config = {"configurable": {"thread_id": f"{macro}:todo:{tid}"}}
+        step_invoke = get_agent_runtime().invoke_kwargs(
+            thread_id=f"{macro}:todo:{tid}",
+            user_id=normalize_user_id(),
+        )
         print(f"\n--- 执行 todo [{tid}] ---\n", flush=True)
-        stream_assistant_reply(agent, prompt, step_config)
+        stream_assistant_reply(
+            agent,
+            prompt,
+            step_invoke["config"],
+            context=step_invoke["context"],
+        )
 
         new_todos: list[TodoItem] = []
         for t in todos:

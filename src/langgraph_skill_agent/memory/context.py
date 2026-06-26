@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import before_model
@@ -33,6 +34,8 @@ from langgraph_skill_agent.memory.tokens import (
     estimate_tokens,
     truncate_to_tokens,
 )
+from langgraph_skill_agent.utility.agent_policy import resolve_agent_scope
+from langgraph_skill_agent.utility.tenant import AgentContext
 
 # 注入式 System 消息标记，便于每轮替换
 CONTEXT_SYSTEM_MARKER = "[CTX-SYSTEM]"
@@ -299,6 +302,7 @@ def apply_context_layers(
     *,
     budget: ContextBudget | None = None,
     rag_context: str = "",
+    mem_dir: Path | None = None,
 ) -> dict[str, list[BaseMessage]]:
     """构建分层上下文并写回 messages（供 before_model 调用）。"""
 
@@ -309,8 +313,12 @@ def apply_context_layers(
     convo = trim_messages_to_budget(convo, budget=budget)
 
     task_state = _serialize_task_state(state)
+    sections = load_memory_sections(mem_dir) if mem_dir is not None else None
     system_text = build_system_content(
-        task_state=task_state, rag_context=rag_context, budget=budget
+        sections=sections,
+        task_state=task_state,
+        rag_context=rag_context,
+        budget=budget,
     )
     system_msg = SystemMessage(content=system_text)
     # add_messages reducer 会追加而非替换；须先 REMOVE_ALL 再写入，避免 CTX / 对话轮次叠乘。
@@ -318,9 +326,11 @@ def apply_context_layers(
 
 
 @before_model(name="enterprise_context_layers")
-def inject_context_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-    del runtime
-    return apply_context_layers(dict(state))
+def inject_context_before_model(
+    state: AgentState, runtime: Runtime[AgentContext]
+) -> dict[str, Any] | None:
+    scope = resolve_agent_scope(runtime.context)
+    return apply_context_layers(dict(state), mem_dir=scope.memory_dir)
 
 
 __all__ = [

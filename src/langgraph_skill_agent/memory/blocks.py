@@ -11,9 +11,13 @@ from langgraph_skill_agent.utility.paths import AGENT_MEMORY_DIR
 _SECTION_SPLIT = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 _DEFAULT_PROCEDURAL = """\
-When a skill asks to run a Python script under skills/:
-- Use workspace_exec_python with program python/python3 and argv_tail like ["skills/test-calc-script/run_calc.py"].
-For whitelisted skill shell scripts, use run_skill_script_shell with a registered script_id (e.g. test-calc.run);
+Filesystem: your sandbox root is the per-user workspace. read_file/write_file/edit_file
+only see files under that workspace plus read-only /system-skills/ (platform skills).
+You cannot access src/, var/, .env, or other project paths via filesystem tools.
+When a skill asks to run a Python script:
+- System skills: workspace_exec_python with argv_tail like ["/system-skills/<skill>/script.py"].
+- User skills: workspace_exec_python with argv_tail like ["skills/<skill>/script.py"].
+For whitelisted platform shell scripts, use run_skill_script_shell with a registered script_id.
 never use workspace_exec_python with bash.
 Use rag_search when the user asks about knowledge-base content.
 """

@@ -3,7 +3,13 @@
 import os
 from pathlib import Path
 
-from langgraph_skill_agent.utility.paths import PROJECT_ROOT, get_project_root
+import pytest
+
+from langgraph_skill_agent.utility.paths import (
+    PROJECT_ROOT,
+    get_project_root,
+    resolve_agent_workspace,
+)
 
 
 def test_project_root_contains_pyproject() -> None:
@@ -22,3 +28,14 @@ def test_get_project_root_clears_empty_override(monkeypatch) -> None:
     root = get_project_root()
     assert (root / "pyproject.toml").is_file()
     assert os.environ.get("PROJECT_ROOT", "").strip() == ""
+
+
+def test_resolve_agent_workspace_explicit_user() -> None:
+    ws = resolve_agent_workspace("alice")
+    assert ws.name == "alice"
+    assert ws.parent == PROJECT_ROOT / "workspace"
+
+
+def test_invalid_agent_user_id_rejected() -> None:
+    with pytest.raises(ValueError, match="invalid AGENT_USER_ID"):
+        resolve_agent_workspace("../evil")

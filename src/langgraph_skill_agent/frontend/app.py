@@ -13,15 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
+from dotenv import load_dotenv
 from langgraph.types import Command
 
-from langgraph_skill_agent.agent_core import build_agent
 from langgraph_skill_agent.memory import (
     get_checkpointer_label,
     maybe_compact_thread,
@@ -29,6 +30,7 @@ from langgraph_skill_agent.memory import (
     prepare_thread_for_turn,
     sync_ui_messages_from_checkpointer,
 )
+from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
 from langgraph_skill_agent.utility.hitl import (
     HitlRequest,
     format_hitl_summary,
@@ -41,6 +43,10 @@ from langgraph_skill_agent.utility.streaming import (
     format_status_line,
     run_assistant_turn,
 )
+from langgraph_skill_agent.utility.tenant import normalize_user_id
+
+# Must run before _ensure_sessions() so AGENT_USER_ID from .env is visible on cold start.
+load_dotenv(PROJECT_ROOT / ".env")
 
 SESSION_HISTORY_DIR = VAR_DIR / "session_history"
 
@@ -83,6 +89,7 @@ def _save_session_index(session_id: str, sess: dict) -> None:
     payload = {
         "title": sess["title"],
         "thread_id": sess["thread_id"],
+        "user_id": sess.get("user_id") or _resolve_ui_agent_user_id(),
         "message_count": len(messages),
         "updated_at": datetime.now(UTC).isoformat(),
     }
@@ -93,10 +100,14 @@ def _load_sessions_from_disk() -> tuple[dict, str | None]:
     d = _history_dir()
     files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     sessions: dict = {}
+    current_user = _resolve_ui_agent_user_id()
     for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            continue
+        owner = str(data.get("user_id") or "default")
+        if owner != current_user:
             continue
         sid = str(data.get("thread_id") or path.stem)
         sessions[sid] = {
@@ -104,14 +115,29 @@ def _load_sessions_from_disk() -> tuple[dict, str | None]:
             "messages": [],
             "message_count": int(data.get("message_count") or 0),
             "thread_id": sid,
+            "user_id": owner,
         }
     default_id = next(iter(sessions)) if sessions else None
     return sessions, default_id
 
 
+def _resolve_ui_agent_user_id() -> str:
+    """Per-browser tenant id for UI; env AGENT_USER_ID overrides (single-tenant / dev)."""
+    env_uid = os.environ.get("AGENT_USER_ID", "").strip()
+    if env_uid:
+        return normalize_user_id(env_uid)
+    if "agent_user_id" not in st.session_state:
+        st.session_state.agent_user_id = f"ui-{uuid.uuid4().hex[:12]}"
+    return normalize_user_id(st.session_state.agent_user_id)
+
+
 @st.cache_resource
-def get_graph():
-    return build_agent()
+def get_runtime():
+    return get_agent_runtime()
+
+
+def _cached_graph():
+    return get_runtime().graph
 
 
 def _ensure_sessions():
@@ -128,6 +154,7 @@ def _ensure_sessions():
                     "messages": [],
                     "message_count": 0,
                     "thread_id": tid,
+                    "user_id": _resolve_ui_agent_user_id(),
                 }
             }
             st.session_state.active_session_id = tid
@@ -139,8 +166,12 @@ def _active_session():
     return st.session_state.sessions[st.session_state.active_session_id]
 
 
-def _thread_config_for_active():
-    return {"configurable": {"thread_id": _active_session()["thread_id"]}}
+def _invoke_args_for_active():
+    active = _active_session()
+    return get_runtime().invoke_kwargs(
+        thread_id=active["thread_id"],
+        user_id=active.get("user_id") or _resolve_ui_agent_user_id(),
+    )
 
 
 def _sync_active_messages_from_checkpointer(*, skip: bool = False) -> None:
@@ -148,7 +179,7 @@ def _sync_active_messages_from_checkpointer(*, skip: bool = False) -> None:
     if skip:
         return
     active = _active_session()
-    sync_ui_messages_from_checkpointer(get_graph(), _thread_config_for_active(), active)
+    sync_ui_messages_from_checkpointer(_cached_graph(), _invoke_args_for_active()["config"], active)
     active["message_count"] = len(active.get("messages") or [])
 
 
@@ -159,6 +190,7 @@ def _new_session():
         "messages": [],
         "message_count": 0,
         "thread_id": tid,
+        "user_id": _resolve_ui_agent_user_id(),
     }
     st.session_state.active_session_id = tid
     _save_session_index(tid, st.session_state.sessions[tid])
@@ -185,6 +217,7 @@ _ensure_sessions()
 
 with st.sidebar:
     st.subheader("会话")
+    st.caption(f"用户沙箱：`{_resolve_ui_agent_user_id()}`")
     st.caption(f"项目根：`{PROJECT_ROOT}`")
     st.caption(f"会话索引：`{SESSION_HISTORY_DIR}`")
     st.caption(f"Checkpointer：{get_checkpointer_label()}")
@@ -223,8 +256,8 @@ active = _active_session()
 _hitl_block = st.session_state.get("hitl_pending")
 _hitl_active = isinstance(_hitl_block, dict) and _hitl_block.get("thread_id") == active["thread_id"]
 if _hitl_active:
-    _cfg = _thread_config_for_active()
-    if get_pending_hitl(get_graph(), _cfg) is None:
+    _cfg = _invoke_args_for_active()["config"]
+    if get_pending_hitl(_cached_graph(), _cfg) is None:
         st.session_state.pop("hitl_pending", None)
         st.rerun()
 
@@ -294,7 +327,7 @@ def _render_hitl_approval(pending: dict[str, Any]) -> None:
 def _run_assistant_and_persist(
     *,
     graph,
-    cfg: dict,
+    invoke: dict,
     user_text: str = "",
     graph_input: Any | None = None,
     text_prefix: str = "",
@@ -302,6 +335,8 @@ def _run_assistant_and_persist(
 ) -> None:
     active = _active_session()
     had_hitl = _active_hitl_pending() is not None
+    cfg = invoke["config"]
+    context = invoke["context"]
 
     prepare_thread_for_turn(
         graph,
@@ -334,6 +369,7 @@ def _run_assistant_and_persist(
                 user_text=user_text,
                 graph_input=graph_input,
                 config=cfg,
+                context=context,
                 on_update=_on_update,
                 decide=None,
                 text_prefix=text_prefix,
@@ -381,22 +417,22 @@ resume_decisions = st.session_state.pop("hitl_resume_decisions", None)
 hitl_pending = _active_hitl_pending()
 
 if resume_decisions and hitl_pending:
-    graph = get_graph()
-    cfg = _thread_config_for_active()
+    graph = _cached_graph()
+    invoke = _invoke_args_for_active()
     _run_assistant_and_persist(
         graph=graph,
-        cfg=cfg,
+        invoke=invoke,
         graph_input=Command(resume={"decisions": resume_decisions}),
         text_prefix=hitl_pending.get("text") or "",
         tool_results_prefix=hitl_pending.get("tool_results") or [],
     )
     st.stop()
 elif prompt_accepted:
-    graph = get_graph()
-    cfg = _thread_config_for_active()
+    graph = _cached_graph()
+    invoke = _invoke_args_for_active()
     _run_assistant_and_persist(
         graph=graph,
-        cfg=cfg,
+        invoke=invoke,
         user_text=prompt,
     )
     st.stop()

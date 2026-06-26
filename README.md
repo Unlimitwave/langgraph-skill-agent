@@ -7,10 +7,11 @@
 | 能力 | 说明 |
 |------|------|
 | Deep Agent | 基于 `create_deep_agent`，支持文件读写、Skills 调用、工具编排 |
-| 本地 Skills | `skills/` 目录下的 `SKILL.md` 定义可复用技能，Agent 按需加载 |
+| 分层 Skills | 系统级挂载 `/system-skills/` + 用户级 `skills/`（同名时用户覆盖系统） |
+| 沙箱工作区 | `CompositeBackend`：默认根为 `workspace/{AGENT_USER_ID}/`；系统 skills 只读挂载 |
 | RAG 检索 | 本机 `var/data` 建索引；向量与 BM25 存远程 Milvus；混合检索（向量 + RRF） |
 | MCP 工具 | 可选接入 FastMCP 外部工具（`MCP_TOOLS=1`） |
-| Skill 脚本 | 支持本机执行 `skills/` 下的 Python / Shell 脚本（`workspace_exec_python` / `run_skill_script_shell`） |
+| Skill 脚本 | 虚拟路径 `/system-skills/...` 或 `skills/...`；Shell 走平台白名单 |
 | 对话记忆 | 长期记忆块（`soul.md` / `user.md` / `Memory.md`）；CLI 支持上下文压缩与退出快照 |
 | 任务规划 | 复杂任务可走 `plan_execute` 外层图：规划 → 分步执行（CLI 可自动路由） |
 | Web UI | Streamlit 前端，流式输出；对话状态存 Postgres checkpointer，侧边栏索引在 `var/session_history/` |
@@ -36,9 +37,13 @@ langgrpah-skills/
 │   │   ├── skill_tools.py         # Skill 脚本执行工具
 │   │   └── mcp_tools.py           # MCP 工具加载
 │   └── utility/                   # 路径、日志、流式输出、JSON 解析等
-├── skills/                        # 本地 Skills 定义
+├── skills/                        # 系统级 Skills 磁盘目录（挂载为 /system-skills/，只读）
 │   ├── demo-greeting/SKILL.md
 │   └── test-calc-script/          # 示例脚本 Skill
+├── workspace/                     # 多用户沙箱根目录
+│   └── default/                   # AGENT_USER_ID=default 时可写工作区
+│       ├── skills/                # 用户级 Skills（虚拟路径 skills/）
+│       └── …                      # 用户任务产物
 ├── tests/
 │   ├── unit/                      # 单元测试
 │   └── integration/               # 集成测试（需 Milvus 等外部服务）
@@ -374,7 +379,11 @@ make pre-commit         # 手动跑全部 pre-commit 检查
 
 ### 编写 Skill
 
-在 `skills/<skill-name>/` 下创建 `SKILL.md`，参考 [`skills/demo-greeting/SKILL.md`](skills/demo-greeting/SKILL.md)：
+**系统级**（平台维护）：在仓库 `skills/<skill-name>/` 下创建 `SKILL.md`（Agent 内虚拟路径 `/system-skills/<skill-name>/`）。
+
+**用户级**：在 `workspace/<AGENT_USER_ID>/skills/<skill-name>/` 下创建 `SKILL.md`（Agent 内虚拟路径 `skills/<skill-name>/`）。同名时 **用户级优先**。
+
+参考 [`skills/demo-greeting/SKILL.md`](skills/demo-greeting/SKILL.md)：
 
 ```markdown
 ---
@@ -389,7 +398,18 @@ description: 何时使用该技能的简短说明
 2. 步骤二
 ```
 
-如需执行脚本，可在 `skill_tools.py` 中注册 shell 脚本 ID，或使用 `workspace_exec_python` 运行 `skills/` 下的 Python 脚本。
+如需执行脚本：系统 Skill 用 `["/system-skills/<skill>/script.py"]`；用户 Skill 用 `["skills/<skill>/script.py"]`。Shell 需在 `skill_tools.py` 注册白名单。
+
+### 安全边界（CompositeBackend 沙箱）
+
+| 虚拟路径 | 磁盘位置 | 读 | 写 |
+|----------|----------|----|----|
+| `/`（工作区根） | `workspace/{AGENT_USER_ID}/` | ✅ | ✅（HITL 审批） |
+| `skills/` | `workspace/{user}/skills/` | ✅ | ✅ |
+| `/system-skills/` | 仓库 `skills/`（只读挂载） | ✅ | ❌ |
+| `src/`、`var/`、`.env` | — | ❌ 不可见 | ❌ |
+
+多用户：默认 Web UI 为每个浏览器分配 `ui-<id>` 沙箱（**勿设 `AGENT_USER_ID`**）。CLI 或单租户部署可设 `AGENT_USER_ID=alice` → `workspace/alice/`。Checkpointer 线程自动加 `{user_id}__` 前缀，避免跨用户串话；记忆在 `workspace/{user}/agent_memory/`。
 
 ### 测试
 
@@ -409,11 +429,11 @@ make test-integration
    ├─ CLI + ENABLE_PLAN_ROUTING=1 ──→ intent_router ──→ plan_execute（规划 → 逐步 Deep Agent）
    │
    └─ 直接对话 ──→ Deep Agent
-                    ├─ Skills（skills/SKILL.md）
-                    ├─ rag_search → 本机 var/data + var/storage + 远程 Milvus / Embedding
+                    ├─ Skills（/system-skills/ → skills/，后者覆盖同名）
+                    ├─ rag_search → 平台 var/data + Milvus（不经 FS 工具）
                     ├─ MCP 工具
-                    ├─ Skill 脚本（本机 workspace_exec_python / run_skill_script_shell）
-                    └─ 文件系统 Backend（读写项目内文件）
+                    ├─ Skill 脚本（/system-skills/ 或 skills/）
+                    └─ CompositeBackend（沙箱 workspace/{user}/ + 只读 /system-skills/）
 ```
 
 - **CLI**：每轮前 `compactor` 压缩上下文；退出时快照 → `var/conversation_history/` → 可跑 `langgraph-summary`。
