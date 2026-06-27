@@ -14,6 +14,7 @@
 | Skill 脚本 | 虚拟路径 `/system-skills/...` 或 `skills/...`；Shell 走平台白名单 |
 | 对话记忆 | 长期记忆块（`soul.md` / `user.md` / `Memory.md`）；CLI 支持上下文压缩与退出快照 |
 | 任务规划 | 复杂任务可走 `plan_execute` 外层图：规划 → 分步执行（CLI 可自动路由） |
+| Supervisor 多智能体 | Research / Worker / Review 分角色协作 + 质量门 + 汇总（CLI 可自动路由） |
 | Web UI | Streamlit 前端，流式输出；对话状态存 Postgres checkpointer，侧边栏索引在 `var/session_history/` |
 
 ## 项目结构
@@ -23,6 +24,11 @@ langgrpah-skills/
 ├── src/langgraph_skill_agent/     # 主包
 │   ├── agent_core.py              # Agent 构建与 CLI 入口（langgraph-agent）
 │   ├── plan_execute.py            # 多步规划执行（langgraph-plan）
+│   ├── multi_agent/               # Supervisor 多智能体（langgraph-supervisor）
+│   │   ├── supervisor.py          # 编排图：规划 → Specialist → 汇总
+│   │   ├── specialists.py         # 按角色编译 Deep Agent
+│   │   ├── roles.py               # 角色 prompt / 工具 / 权限
+│   │   └── handoff.py             # 结构化 Handoff 契约
 │   ├── intent_router.py           # 判断是否需要走规划流程
 │   ├── deepseek_model.py          # DeepSeek 模型封装
 │   ├── frontend/                  # Streamlit Web UI（langgraph-ui）
@@ -106,6 +112,8 @@ cp .env.example .env
 | `AGENT_TOOL_TRACE` | `1` 输出 Agent 工具调用调试日志，`0` 关闭 |
 | `MCP_TOOLS` | `1` 启用 MCP 工具，`0` 关闭 |
 | `ENABLE_PLAN_ROUTING` | `1` 启用 **CLI** 自动路由到规划流程 |
+| `ENABLE_MULTI_AGENT_ROUTING` | `1` 启用 **CLI** 自动路由到 Supervisor 多智能体 |
+| `SUPERVISOR_MAX_REVIEW_RETRIES` | Review 不通过时 Worker 最大重试次数（默认 `2`） |
 | `COMPACT_ENABLED` | `1` 启用 **CLI** 跨轮 LLM 摘要压缩（默认开启） |
 | `CONTEXT_WINDOW` | 模型上下文窗口 token 数（默认 `128000`）；compactor / 裁剪瀑布共用 |
 | `CONTEXT_RESERVE_TOKENS` | 预留给本轮回复 + 工具输出（默认 `8000`） |
@@ -250,7 +258,8 @@ uv run langgraph-summary --dry-run      # 预览，不写文件
 | 能力 | CLI（`make run-agent`） | Web UI（`make run-ui`） |
 |------|---------------------------|-------------------------|
 | 上下文压缩 `compactor` | ✅ 每轮对话前自动压缩 | ❌ 未接入 |
-| 规划自动路由 `ENABLE_PLAN_ROUTING` | ✅ 可开启 | ❌ 未接入；复杂任务请用 `langgraph-plan` |
+| 规划自动路由 `ENABLE_PLAN_ROUTING` | ✅ 可开启 | ✅ 可开启 |
+| 多智能体路由 `ENABLE_MULTI_AGENT_ROUTING` | ✅ 可开启 | ✅ 可开启 |
 | 会话持久化 | 退出时写入 `var/conversation_history/` | checkpointer（Postgres 等）+ 侧边栏索引 `var/session_history/*.json` |
 | `langgraph-summary` | ✅ 使用 CLI 快照 | ❌ UI 会话需手动转换格式后才可用 |
 
@@ -265,6 +274,7 @@ uv run langgraph-summary --dry-run      # 预览，不写文件
 | `langgraph-agent` | CLI 持续对话 |
 | `langgraph-ui` | 启动 Streamlit Web UI |
 | `langgraph-plan` | 多步规划 + 分步执行 |
+| `langgraph-supervisor` | Supervisor 多智能体（Research/Worker/Review） |
 | `langgraph-summary` | 从对话快照更新记忆文件 |
 
 ## Docker 部署
@@ -426,7 +436,8 @@ make test-integration
 ```
 用户输入
    │
-   ├─ CLI + ENABLE_PLAN_ROUTING=1 ──→ intent_router ──→ plan_execute（规划 → 逐步 Deep Agent）
+   ├─ CLI + 路由开启 ──→ intent_router ──→ supervisor（Research/Worker/Review → 汇总）
+   │                                    └─→ plan_execute（规划 → 逐步 Deep Agent）
    │
    └─ 直接对话 ──→ Deep Agent
                     ├─ Skills（/system-skills/ → skills/，后者覆盖同名）
@@ -436,8 +447,10 @@ make test-integration
                     └─ CompositeBackend（沙箱 workspace/{user}/ + 只读 /system-skills/）
 ```
 
+- **CLI 路由**：`ENABLE_MULTI_AGENT_ROUTING=1` 与 `ENABLE_PLAN_ROUTING=1` 可同时开启；`intent_router` 在已启用模式中选 `supervisor` / `plan` / `direct`。
+- **Web UI 路由**：与 CLI 共用相同环境变量；复杂任务在聊天框输入后自动分流，编排过程流式展示，Worker 写操作支持 HITL 审批。
 - **CLI**：每轮前 `compactor` 压缩上下文；退出时快照 → `var/conversation_history/` → 可跑 `langgraph-summary`。
-- **Web UI**：无 compactor / 规划路由；对话 checkpoint → Postgres（或 sqlite/memory）；侧边栏索引 → `var/session_history/`。
+- **Web UI**：无 compactor；对话 checkpoint → Postgres（或 sqlite/memory）；侧边栏索引 → `var/session_history/`。
 
 ## License
 

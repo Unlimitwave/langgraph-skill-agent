@@ -23,6 +23,16 @@ import streamlit as st
 from dotenv import load_dotenv
 from langgraph.types import Command
 
+from langgraph_skill_agent.frontend.orchestration import (
+    _routing_caption,
+    active_orch_pending,
+    render_orch_pending_bubbles,
+    render_orchestration_message,
+    resume_orchestration_after_hitl,
+    run_orchestration_for_ui,
+    ui_routing_enabled,
+)
+from langgraph_skill_agent.intent_router import resolve_execution_mode
 from langgraph_skill_agent.memory import (
     get_checkpointer_label,
     maybe_compact_thread,
@@ -221,6 +231,7 @@ with st.sidebar:
     st.caption(f"项目根：`{PROJECT_ROOT}`")
     st.caption(f"会话索引：`{SESSION_HISTORY_DIR}`")
     st.caption(f"Checkpointer：{get_checkpointer_label()}")
+    st.caption(_routing_caption())
     if st.button("➕ 新建会话", use_container_width=True):
         _new_session()
         st.rerun()
@@ -255,17 +266,19 @@ active = _active_session()
 
 _hitl_block = st.session_state.get("hitl_pending")
 _hitl_active = isinstance(_hitl_block, dict) and _hitl_block.get("thread_id") == active["thread_id"]
+_orch_block = active_orch_pending(st.session_state.active_session_id)
+_orch_active = _orch_block is not None
 if _hitl_active:
     _cfg = _invoke_args_for_active()["config"]
     if get_pending_hitl(_cached_graph(), _cfg) is None:
         st.session_state.pop("hitl_pending", None)
         st.rerun()
 
-prompt = st.chat_input("输入消息…", disabled=_hitl_active)
+prompt = st.chat_input("输入消息…", disabled=_hitl_active or _orch_active)
 
 prompt_accepted = False
 if prompt:
-    if _hitl_active:
+    if _hitl_active or _orch_active:
         st.warning("请先批准或拒绝待处理的工具调用。")
     else:
         if not active.get("messages"):
@@ -301,7 +314,7 @@ def _clear_hitl_pending() -> None:
     st.session_state.pop("hitl_pending", None)
 
 
-def _render_hitl_approval(pending: dict[str, Any]) -> None:
+def _render_hitl_approval(pending: dict[str, Any], *, key_prefix: str = "hitl") -> None:
     hitl = HitlRequest(
         action_requests=pending.get("hitl", {}).get("action_requests") or [],
         review_configs=pending.get("hitl", {}).get("review_configs") or [],
@@ -310,10 +323,10 @@ def _render_hitl_approval(pending: dict[str, Any]) -> None:
     st.markdown(format_hitl_summary(hitl))
     n_actions = len(hitl.action_requests)
     c1, c2 = st.columns(2)
-    if c1.button("✅ 批准", key="hitl_approve", use_container_width=True):
+    if c1.button("✅ 批准", key=f"{key_prefix}_approve", use_container_width=True):
         st.session_state.hitl_resume_decisions = [{"type": "approve"} for _ in range(n_actions)]
         st.rerun()
-    if c2.button("❌ 拒绝", key="hitl_reject", use_container_width=True):
+    if c2.button("❌ 拒绝", key=f"{key_prefix}_reject", use_container_width=True):
         st.session_state.hitl_resume_decisions = [
             {
                 "type": "reject",
@@ -407,6 +420,9 @@ def _run_assistant_and_persist(
 
 
 for msg in messages:
+    if msg.get("orchestration"):
+        render_orchestration_message(msg)
+        continue
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
             _render_message_content(msg)
@@ -415,8 +431,17 @@ for msg in messages:
 
 resume_decisions = st.session_state.pop("hitl_resume_decisions", None)
 hitl_pending = _active_hitl_pending()
+orch_pending = active_orch_pending(st.session_state.active_session_id)
 
-if resume_decisions and hitl_pending:
+if resume_decisions and orch_pending:
+    resume_orchestration_after_hitl(
+        active=active,
+        session_id=st.session_state.active_session_id,
+        decisions=resume_decisions,
+    )
+    _save_session_index(st.session_state.active_session_id, active)
+    st.stop()
+elif resume_decisions and hitl_pending:
     graph = _cached_graph()
     invoke = _invoke_args_for_active()
     _run_assistant_and_persist(
@@ -428,6 +453,22 @@ if resume_decisions and hitl_pending:
     )
     st.stop()
 elif prompt_accepted:
+    exec_mode = "direct"
+    if ui_routing_enabled():
+        exec_mode = resolve_execution_mode(prompt)
+
+    if exec_mode in {"supervisor", "plan"}:
+        macro = f"{active['thread_id']}-{exec_mode}"
+        run_orchestration_for_ui(
+            mode=exec_mode,
+            user_goal=prompt,
+            macro_thread_id=macro,
+            active=active,
+            session_id=st.session_state.active_session_id,
+        )
+        _save_session_index(st.session_state.active_session_id, active)
+        st.stop()
+
     graph = _cached_graph()
     invoke = _invoke_args_for_active()
     _run_assistant_and_persist(
@@ -436,6 +477,17 @@ elif prompt_accepted:
         user_text=prompt,
     )
     st.stop()
+elif _orch_active and orch_pending:
+    render_orch_pending_bubbles(orch_pending)
+    st.warning("编排任务暂停：以下工具调用需要审批。")
+    _render_hitl_approval(
+        {
+            "hitl": (orch_pending.get("view") or {}).get("hitl") or {},
+            "text": (orch_pending.get("view") or {}).get("text_prefix") or "",
+            "tool_results": (orch_pending.get("view") or {}).get("tool_results") or [],
+        },
+        key_prefix="orch_hitl",
+    )
 elif _active_hitl_pending():
     hitl_pending = _active_hitl_pending()
     with st.chat_message("assistant"):

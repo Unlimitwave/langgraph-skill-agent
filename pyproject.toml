@@ -43,6 +43,7 @@ ui = [
 [project.scripts]
 langgraph-agent = "langgraph_skill_agent.agent_core:main"
 langgraph-plan = "langgraph_skill_agent.plan_execute:main"
+langgraph-supervisor = "langgraph_skill_agent.multi_agent.supervisor:main"
 langgraph-summary = "langgraph_skill_agent.memory.summary:main"
 langgraph-ui = "langgraph_skill_agent.frontend:main"
 

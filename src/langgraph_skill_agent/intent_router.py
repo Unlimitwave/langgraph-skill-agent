@@ -1,37 +1,75 @@
-"""根据用户一句话判断是否适合走「显式 todo + 多步 Deep Agent」。"""
+"""根据用户输入路由执行模式：直连 / plan / supervisor。"""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from langgraph_skill_agent.agent_core import build_chat_model
+from langgraph_skill_agent.multi_agent.config import multi_agent_routing_enabled
 from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
+from langgraph_skill_agent.utility.logging_config import env_truthy
 
 logger = logging.getLogger(__name__)
 
-_ROUTER_SYSTEM = """你是路由分类器，只判断本轮用户输入是否需要「多步任务规划」。
+ExecutionMode = Literal["direct", "plan", "supervisor"]
 
-需要规划（needs_plan 为 true）的典型情况：
-- 明确多步骤：调研→总结→写文档、先查再改再测、分阶段交付等
-- 依赖多次工具/检索/写文件/跑脚本的综合任务
-- 用户要求列计划、分步、todo、里程碑等
+# 1=每轮 LLM 意图分类（direct/plan/supervisor）；0=按 ENABLE_MULTI_AGENT_ROUTING / ENABLE_PLAN_ROUTING 固定模式
+ENABLE_INTENT_ROUTING_ENV = "ENABLE_INTENT_ROUTING"
 
-不需要规划（needs_plan 为 false）的典型情况：
-- 问候、闲聊、感谢、告别
-- 单个知识点问答、一句话能答完的翻译/解释
-- 极短无实质任务（如「好」「嗯」「继续」且没有新任务描述）
+_ROUTER_SYSTEM = """你是路由分类器，判断本轮用户输入应使用的执行模式。
 
-宁可判为 false：不确定时选 false，避免把简单对话做成重型流程。"""
+可选模式（仅能从下列已启用模式中选择）：
+{enabled_modes_block}
+
+模式说明：
+- direct：问候、闲聊、单轮问答、极短确认；一次 Deep Agent 对话即可。
+- plan：多步骤任务，但各步能力相同（检索+写文件+脚本），由同一 Worker 顺序执行。
+- supervisor：需要不同 Specialist 协作（调研 research → 交付 worker → 审查 review），
+  或用户明确要求分角色/审查/质检/调研后撰写等流水线。
+
+路由原则：
+- 宁可 direct：不确定时优先 direct，避免把简单对话做成重型流程。
+- supervisor 优先于 plan：若任务明显需要「调研+撰写+审查」分角色，选 supervisor（若已启用）。
+- plan：多步但不需要分角色审查时选 plan（若已启用）。"""
 
 
 class RouterModel(BaseModel):
     needs_plan: bool = Field(
         description="为 true 表示应走外层 plan_execute；为 false 表示直接单轮 Deep Agent 对话。"
     )
+
+
+class ExecutionModeRouterModel(BaseModel):
+    mode: ExecutionMode = Field(description="direct | plan | supervisor")
+
+
+def _plan_routing_enabled() -> bool:
+    from langgraph_skill_agent.agent_core import plan_routing_enabled
+
+    return plan_routing_enabled()
+
+
+def intent_routing_enabled() -> bool:
+    """默认开启：与历史行为一致，由 LLM 按用户输入选模式。"""
+    raw = os.environ.get(ENABLE_INTENT_ROUTING_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return env_truthy(ENABLE_INTENT_ROUTING_ENV)
+
+
+def resolve_env_forced_mode() -> ExecutionMode:
+    """Intent 关闭时：MULTI_AGENT 优先于 PLAN，均未开则 direct。"""
+    if multi_agent_routing_enabled():
+        return "supervisor"
+    if _plan_routing_enabled():
+        return "plan"
+    return "direct"
 
 
 def _quick_heuristic_skip_router(text: str) -> bool | None:
@@ -51,18 +89,42 @@ def _normalize_user_text(text: str) -> str:
     return text.replace("\x08", "").strip()
 
 
-def user_needs_plan_execute(user_text: str) -> bool:
-    """DeepSeek 等不支持 LangChain 默认 structured parse 时使用普通 JSON 文本解析。"""
+def _enabled_modes_description() -> tuple[list[ExecutionMode], str]:
+    modes: list[ExecutionMode] = ["direct"]
+    lines = ["- direct（始终可用）"]
+    if multi_agent_routing_enabled():
+        modes.append("supervisor")
+        lines.append("- supervisor")
+    if _plan_routing_enabled():
+        modes.append("plan")
+        lines.append("- plan")
+    return modes, "\n".join(lines)
+
+
+def resolve_execution_mode(user_text: str) -> ExecutionMode:
+    """在已启用的 advanced 模式中选 direct / plan / supervisor。"""
+
+    # 获取环境变量，判断是否路由
+    if not intent_routing_enabled():
+        # 按环境变量，固定走下方已启用的编排模式（MULTI_AGENT 优先于 PLAN）
+        return resolve_env_forced_mode()
+
     user_text = _normalize_user_text(user_text)
-    quick = _quick_heuristic_skip_router(user_text)
-    if quick is True:
-        return False
+
+    # 快速启发式跳过路由，判断是否闲聊
+    if _quick_heuristic_skip_router(user_text) is True:
+        return "direct"
+
+    # 获取已启用的编排模式，并构建路由系统提示词
+    enabled_modes, modes_block = _enabled_modes_description()
+    if enabled_modes == ["direct"]:
+        return "direct"
 
     llm = build_chat_model(streaming=False)
     router_instruction = (
-        _ROUTER_SYSTEM
+        _ROUTER_SYSTEM.format(enabled_modes_block=modes_block)
         + "\n\n【输出格式】只输出一个 JSON 对象，不要其它说明文字，不要 markdown 代码块。示例："
-        + '{"needs_plan": false}'
+        + '{"mode": "direct"}'
     )
     msg = llm.invoke(
         [
@@ -74,9 +136,29 @@ def user_needs_plan_execute(user_text: str) -> bool:
     data = extract_first_json_object(raw)
     if not data:
         logger.warning("路由 JSON 解析失败，保守走直连对话。原始片段: %r", raw[:300])
-        return False
+        return "direct"
     try:
-        return RouterModel.model_validate(data).needs_plan
+        # 验证路由返回的 JSON 是否符合预期
+        mode = ExecutionModeRouterModel.model_validate(data).mode
     except Exception as e:
         logger.warning("路由 JSON 与模式不符: %s data=%r", e, data)
+        return "direct"
+
+    if mode not in enabled_modes:
+        logger.warning("路由返回未启用的模式 %s，回退 direct", mode)
+        return "direct"
+    return mode
+
+
+def user_needs_plan_execute(user_text: str) -> bool:
+    """兼容旧接口：仅在 plan 路由开启时等价于 resolve_execution_mode == plan。"""
+    if not _plan_routing_enabled():
         return False
+    return resolve_execution_mode(user_text) == "plan"
+
+
+def user_needs_supervisor(user_text: str) -> bool:
+    """仅在 multi-agent 路由开启时等价于 resolve_execution_mode == supervisor。"""
+    if not multi_agent_routing_enabled():
+        return False
+    return resolve_execution_mode(user_text) == "supervisor"

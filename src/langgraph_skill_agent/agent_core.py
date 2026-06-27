@@ -6,6 +6,7 @@ Deep Agent（LangChain deepagents）+ 本地 Skills + RAG。
   langgraph-agent
   langgraph-ui
   langgraph-plan "目标"
+  langgraph-supervisor "目标"
   langgraph-summary
 """
 
@@ -130,7 +131,7 @@ def build_chat_model(*, streaming: bool = True) -> ChatDeepSeekWithReasoningPass
     return build_deepseek_chat_model(streaming=streaming)
 
 
-def _plan_routing_enabled() -> bool:
+def plan_routing_enabled() -> bool:
     return os.environ.get("ENABLE_PLAN_ROUTING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -222,11 +223,25 @@ def main() -> None:
             print("再见。")
             break
 
-        if _plan_routing_enabled():
-            from langgraph_skill_agent.intent_router import user_needs_plan_execute
-            from langgraph_skill_agent.plan_execute import run_macro_task
+        from langgraph_skill_agent.intent_router import resolve_execution_mode
+        from langgraph_skill_agent.multi_agent.config import multi_agent_routing_enabled
 
-            if user_needs_plan_execute(user_text):
+        if multi_agent_routing_enabled() or plan_routing_enabled():
+            # 根据用户输入，路由到对应的执行模式
+            mode = resolve_execution_mode(user_text)
+            if mode == "supervisor":
+                from langgraph_skill_agent.multi_agent.supervisor import run_supervisor_task
+
+                print(
+                    "\n[路由] 判定为多智能体任务 → Supervisor（Research/Worker/Review）\n",
+                    flush=True,
+                )
+                run_supervisor_task(user_text, macro_thread_id=f"{thread_id}-supervisor")
+                print()
+                continue
+            if mode == "plan":
+                from langgraph_skill_agent.plan_execute import run_macro_task
+
                 print("\n[路由] 判定为复杂任务 → 显式规划 + 分步执行\n", flush=True)
                 run_macro_task(user_text, macro_thread_id=f"{thread_id}-plan")
                 print()
