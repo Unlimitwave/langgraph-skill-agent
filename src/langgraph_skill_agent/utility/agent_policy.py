@@ -15,6 +15,8 @@ from langgraph_skill_agent.utility.paths import (
     SKILLS_DIR,
     resolve_agent_memory_dir,
     resolve_agent_workspace,
+    resolve_rag_data_dir,
+    resolve_rag_storage_dir,
     resolve_user_skills_dir,
 )
 from langgraph_skill_agent.utility.tenant import AgentContext
@@ -96,6 +98,8 @@ def ensure_agent_workspace_dirs(user_id: str | None = None) -> Path:
     ws.mkdir(parents=True, exist_ok=True)
     resolve_user_skills_dir(user_id).mkdir(parents=True, exist_ok=True)
     resolve_agent_memory_dir(user_id).mkdir(parents=True, exist_ok=True)
+    resolve_rag_data_dir(user_id).mkdir(parents=True, exist_ok=True)
+    resolve_rag_storage_dir(user_id).mkdir(parents=True, exist_ok=True)
     return ws
 
 

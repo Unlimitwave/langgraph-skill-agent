@@ -15,19 +15,32 @@ from llama_index.core import (  # type: ignore
 )
 from llama_index.core.embeddings import BaseEmbedding  # type: ignore
 from llama_index.core.retrievers import BaseRetriever, VectorIndexRetriever  # type: ignore
-from llama_index.core.vector_stores.types import VectorStoreQueryMode  # type: ignore
+from llama_index.core.vector_stores.types import (  # type: ignore
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+    VectorStoreQueryMode,
+)
 from pydantic import PrivateAttr
 
 try:
     from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
+    from pymilvus import DataType  # type: ignore
 except ImportError as e:  # pragma: no cover
     raise ImportError(
         "请安装 Milvus 集成：pip install llama-index-vector-stores-milvus pymilvus"
     ) from e
 
-from langgraph_skill_agent.utility.paths import RAG_DATA_DIR, RAG_STORAGE_DIR
+from langgraph_skill_agent.utility.paths import (
+    RAG_DATA_DIR,
+    RAG_STORAGE_DIR,
+    resolve_rag_data_dir,
+    resolve_rag_storage_dir,
+)
+from langgraph_skill_agent.utility.tenant import normalize_tenant_id, normalize_user_id
 
-_RAG_RETRIEVER: BaseRetriever | None = None
+_RAG_RETRIEVERS: dict[tuple[str, str], BaseRetriever] = {}
+_RAG_TENANT_KEYS = ("user_id", "tenant_id")
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +122,33 @@ def _build_pdf_file_extractor() -> dict:
         ) from e
 
 
+def _resolve_rag_paths(user_id: str) -> tuple[Path, Path]:
+    """Per-user RAG dirs; legacy var/data + var/storage for default user when workspace empty."""
+    data_dir = resolve_rag_data_dir(user_id)
+    storage_dir = resolve_rag_storage_dir(user_id)
+    if user_id == "default":
+        if (not data_dir.exists() or not any(data_dir.iterdir())) and RAG_DATA_DIR.exists():
+            data_dir = RAG_DATA_DIR
+        if not _storage_has_index(storage_dir) and _storage_has_index(RAG_STORAGE_DIR):
+            storage_dir = RAG_STORAGE_DIR
+    return data_dir, storage_dir
+
+
+def _tenant_metadata_filters(user_id: str, tenant_id: str) -> MetadataFilters:
+    return MetadataFilters(
+        filters=[
+            MetadataFilter(key="user_id", value=user_id, operator=FilterOperator.EQ),
+            MetadataFilter(key="tenant_id", value=tenant_id, operator=FilterOperator.EQ),
+        ]
+    )
+
+
+def _stamp_docs_with_tenant(docs: list, *, user_id: str, tenant_id: str) -> None:
+    for doc in docs:
+        doc.metadata["user_id"] = user_id
+        doc.metadata["tenant_id"] = tenant_id
+
+
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -148,6 +188,8 @@ def _milvus_vector_store(*, overwrite: bool) -> MilvusVectorStore:
         hybrid_ranker="RRFRanker",
         hybrid_ranker_params={"k": rrf_k},
         use_async_client=False,
+        scalar_field_names=list(_RAG_TENANT_KEYS),
+        scalar_field_types=[DataType.VARCHAR, DataType.VARCHAR],
     )
 
 
@@ -161,14 +203,30 @@ def _storage_has_index(persist_dir: Path) -> bool:
     return docstore.is_file() and index_store.is_file()
 
 
-def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
-    data_dir = RAG_DATA_DIR
-    storage_dir = RAG_STORAGE_DIR
+def _dir_has_indexable_files(data_dir: Path) -> bool:
+    if not data_dir.is_dir():
+        return False
+    for path in data_dir.rglob("*"):
+        if path.is_file() and not path.name.startswith("."):
+            return True
+    return False
+
+
+def _build_or_load_index(
+    embed_model: BaseEmbedding,
+    *,
+    user_id: str,
+    tenant_id: str,
+) -> VectorStoreIndex | None:
+    data_dir, storage_dir = _resolve_rag_paths(user_id)
 
     force_rebuild = _env_truthy("RAG_FORCE_REBUILD")
     if force_rebuild and storage_dir.exists():
         shutil.rmtree(storage_dir)
-        _trace(f"removed storage_dir for rebuild (RAG_FORCE_REBUILD): {storage_dir}")
+        _trace(
+            f"removed storage_dir for rebuild (RAG_FORCE_REBUILD): {storage_dir} "
+            f"(user_id={user_id!r} tenant_id={tenant_id!r})"
+        )
 
     # 有本地持久化元数据则从 Milvus 恢复索引图；稠密+BM25 数据在 Milvus collection 内
     if _storage_has_index(storage_dir):
@@ -181,17 +239,25 @@ def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
         index = load_index_from_storage(sc, embed_model=embed_model)
         _trace(
             f"load_index_from_storage+milvus took {time.perf_counter() - t0:.3f}s "
-            f"(storage_dir={storage_dir})"
+            f"(storage_dir={storage_dir} user_id={user_id!r} tenant_id={tenant_id!r})"
         )
         return index
 
-    if not data_dir.exists():
-        raise ValueError(f"知识库目录不存在：{data_dir}（请创建并放入文档，或设置 RAG_DATA_DIR）")
+    if not _dir_has_indexable_files(data_dir):
+        _trace(
+            f"skip index build: no documents in {data_dir} "
+            f"(user_id={user_id!r} tenant_id={tenant_id!r})"
+        )
+        return None
 
     pdf_extractor = _build_pdf_file_extractor()
     t0 = time.perf_counter()
     docs = SimpleDirectoryReader(str(data_dir), file_extractor=pdf_extractor).load_data()
-    _trace(f"SimpleDirectoryReader.load_data took {time.perf_counter() - t0:.3f}s (dir={data_dir})")
+    _stamp_docs_with_tenant(docs, user_id=user_id, tenant_id=tenant_id)
+    _trace(
+        f"SimpleDirectoryReader.load_data took {time.perf_counter() - t0:.3f}s "
+        f"(dir={data_dir} user_id={user_id!r} tenant_id={tenant_id!r})"
+    )
 
     storage_dir.mkdir(parents=True, exist_ok=True)
     # RAG_FORCE_REBUILD=1 时已删本地 storage，需同步 drop Milvus 旧 collection（避免旧 schema 无稀疏）
@@ -202,7 +268,8 @@ def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
     t1 = time.perf_counter()
     index = VectorStoreIndex.from_documents(docs, storage_context=sc, embed_model=embed_model)
     _trace(
-        f"VectorStoreIndex.from_documents took {time.perf_counter() - t1:.3f}s (n_docs={len(docs)})"
+        f"VectorStoreIndex.from_documents took {time.perf_counter() - t1:.3f}s "
+        f"(n_docs={len(docs)} user_id={user_id!r} tenant_id={tenant_id!r})"
     )
 
     t2 = time.perf_counter()
@@ -211,24 +278,40 @@ def _build_or_load_index(embed_model: BaseEmbedding) -> VectorStoreIndex:
     return index
 
 
-def _build_hybrid_retriever(index: VectorStoreIndex) -> BaseRetriever:
+def _build_hybrid_retriever(
+    index: VectorStoreIndex,
+    *,
+    user_id: str,
+    tenant_id: str,
+) -> BaseRetriever:
     """稠密 + Milvus 内置 BM25，RRF 在 Milvus hybrid_search（RRFRanker）中完成。"""
     top_k = int(os.environ.get("RAG_TOP_K", "8"))
     return VectorIndexRetriever(
         index=index,
         similarity_top_k=top_k,
         vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+        filters=_tenant_metadata_filters(user_id, tenant_id),
     )
 
 
-def _get_rag_retriever() -> BaseRetriever:
-    global _RAG_RETRIEVER
-    if _RAG_RETRIEVER is not None:
-        return _RAG_RETRIEVER
+def _get_rag_retriever(user_id: str, tenant_id: str = "default") -> BaseRetriever | None:
+    uid = normalize_user_id(user_id)
+    tid = normalize_tenant_id(tenant_id)
+    cache_key = (uid, tid)
+    cached = _RAG_RETRIEVERS.get(cache_key)
+    if cached is not None:
+        return cached
 
     t0 = time.perf_counter()
     embed_model = _build_remote_openai_compatible_embedding()
-    index = _build_or_load_index(embed_model=embed_model)
-    _RAG_RETRIEVER = _build_hybrid_retriever(index)
-    _trace(f"_get_rag_retriever init took {time.perf_counter() - t0:.3f}s")
-    return _RAG_RETRIEVER
+    index = _build_or_load_index(embed_model=embed_model, user_id=uid, tenant_id=tid)
+    if index is None:
+        return None
+
+    retriever = _build_hybrid_retriever(index, user_id=uid, tenant_id=tid)
+    _RAG_RETRIEVERS[cache_key] = retriever
+    _trace(
+        f"_get_rag_retriever init took {time.perf_counter() - t0:.3f}s "
+        f"(user_id={uid!r} tenant_id={tid!r})"
+    )
+    return retriever

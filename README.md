@@ -9,7 +9,7 @@
 | Deep Agent | 基于 `create_deep_agent`，支持文件读写、Skills 调用、工具编排 |
 | 分层 Skills | 系统级挂载 `/system-skills/` + 用户级 `skills/`（同名时用户覆盖系统） |
 | 沙箱工作区 | `CompositeBackend`：默认根为 `workspace/{AGENT_USER_ID}/`；系统 skills 只读挂载 |
-| RAG 检索 | 本机 `var/data` 建索引；向量与 BM25 存远程 Milvus；混合检索（向量 + RRF） |
+| RAG 检索 | 每用户 `workspace/{user_id}/rag_data/` 建索引；向量存共享 Milvus collection（`user_id`+`tenant_id` filter）；混合检索（向量 + BM25 + RRF） |
 | MCP 工具 | 可选接入 FastMCP 外部工具（`MCP_TOOLS=1`） |
 | Skill 脚本 | 虚拟路径 `/system-skills/...` 或 `skills/...`；Shell 走平台白名单 |
 | 对话记忆 | 长期记忆块（`soul.md` / `user.md` / `Memory.md`）；CLI 支持上下文压缩与退出快照 |
@@ -38,7 +38,8 @@ langgrpah-skills/
 │   │   ├── summary.py             # 记忆摘要更新（langgraph-summary）
 │   │   └── blocks.py              # 加载 agent 记忆块
 │   ├── rag/
-│   │   └── retriever.py           # RAG 索引构建与检索
+│   │   ├── retriever.py           # RAG 索引构建与检索（多租户 filter）
+│   │   └── rag_readme.md          # RAG 模块详细说明
 │   ├── tool/
 │   │   ├── skill_tools.py         # Skill 脚本执行工具
 │   │   └── mcp_tools.py           # MCP 工具加载
@@ -49,6 +50,8 @@ langgrpah-skills/
 ├── workspace/                     # 多用户沙箱根目录
 │   └── default/                   # AGENT_USER_ID=default 时可写工作区
 │       ├── skills/                # 用户级 Skills（虚拟路径 skills/）
+│       ├── rag_data/              # 该用户 RAG 源文档
+│       ├── rag_storage/           # 该用户 LlamaIndex 元数据
 │       └── …                      # 用户任务产物
 ├── tests/
 │   ├── unit/                      # 单元测试
@@ -57,8 +60,8 @@ langgrpah-skills/
 │   ├── agent_memory/              # 长期记忆 Markdown
 │   ├── conversation_history/      # CLI 退出快照（供 langgraph-summary）
 │   ├── session_history/           # Web UI 会话 JSON
-│   ├── data/                      # RAG 原始文档（建索引前需手动创建并放入文件）
-│   └── storage/                   # LlamaIndex 本地元数据缓存（向量在 Milvus）
+│   ├── data/                      # legacy：default 用户 RAG 源文档回退路径
+│   └── storage/                   # legacy：default 用户 LlamaIndex 元数据回退（向量在 Milvus）
 ├── deploy/
 │   └── postgres/                  # Postgres 分库初始化脚本
 ├── .env.example                   # 环境变量模板
@@ -128,13 +131,13 @@ cp .env.example .env
 
 ### 3. RAG 部署（可选）
 
-RAG 由三部分组成，**彼此分离、可分机部署**：
+RAG 由三部分组成，**彼此分离、可分机部署**；身份与 Agent 沙箱一致，走 `AgentContext` 的 `user_id` / `tenant_id`（详见 [`src/langgraph_skill_agent/rag/rag_readme.md`](src/langgraph_skill_agent/rag/rag_readme.md)）。
 
 | 组件 | 存放位置 | 说明 |
 |------|----------|------|
-| 原始文档 | 本机 `var/data/`（或 `RAG_DATA_DIR`） | 建索引时的 PDF / 文档来源 |
-| 向量与稀疏索引 | **远程 Milvus**（`MILVUS_URI`） | 稠密向量 + BM25 数据在 collection 内 |
-| LlamaIndex 元数据 | 本机 `var/storage/`（或 `RAG_STORAGE_DIR`） | docstore / index_store 本地缓存 |
+| 原始文档 | `workspace/{user_id}/rag_data/` | 每用户独立；`default` 可回退 `var/data/` |
+| 向量与稀疏索引 | **远程 Milvus**（`MILVUS_URI`） | 共享 collection；每条向量带 `user_id` / `tenant_id` 标量，检索时 filter |
+| LlamaIndex 元数据 | `workspace/{user_id}/rag_storage/` | 每用户 docstore；`default` 可回退 `var/storage/` |
 
 **典型用法（Milvus 在远程服务器）**——与本仓库 `docker-compose` 里的 Milvus 栈无关：
 
@@ -146,7 +149,9 @@ MILVUS_COLLECTION=rag_llamaindex
 EMBED_BASE_URL=http://your-embed-host:8080/v1
 ```
 
-在本机准备文档并启动 Agent（`make run-ui` 或 `make run-agent`）即可；首次调用 `rag_search` 时会读取 `var/data/`、向远程 Embedding 服务请求向量，并写入远程 Milvus。
+在本机准备文档并启动 Agent（`make run-ui` 或 `make run-agent`）即可；首次对该用户调用 `rag_search` 时会读取其 `rag_data/`、向远程 Embedding 请求向量，并写入远程 Milvus（带租户标量）。
+
+**单租户 / CLI（`default` 用户，兼容旧路径）：**
 
 ```bash
 mkdir -p var/data
@@ -154,8 +159,16 @@ mkdir -p var/data
 make run-ui   # 或 make run-agent
 ```
 
-- 索引**不会**自动创建 `var/data/`，目录不存在时会报错。
-- 已有本地 `var/storage/` 且 Milvus 中 collection 完好时，会直接加载；换模型 / 改 schema / 索引损坏时，可临时设 `RAG_FORCE_REBUILD=1` 重建。
+**多用户 Web UI（每浏览器 `ui-<id>`）：**
+
+```bash
+mkdir -p workspace/ui-abc123/rag_data
+# 将文档放入该目录
+make run-ui
+```
+
+- 用户无 `rag_data` 文件时，`rag_search` 返回 `(no results)`，不中断对话。
+- 已有该用户 `rag_storage/` 且 Milvus collection schema 一致时会直接加载；换模型 / 改 schema / **从无租户标量升级** 时，设 `RAG_FORCE_REBUILD=1` 重建。
 - 远程 Milvus 需保证本机网络可达（防火墙、TLS、token 等按你的集群配置）。
 
 ### 4. 启动应用
@@ -326,7 +339,7 @@ make docker-up-milvus         # app + etcd + minio + milvus
 |----|------|
 | `MILVUS_URI` | 默认从 `.env` 读取远程地址；仅 `make docker-up-milvus` 时覆盖为 `http://milvus:19530` |
 | `EMBED_BASE_URL` | 容器内 `127.0.0.1` 是容器自身；Embedding 在宿主机时用 `host.docker.internal`（Mac/Windows）或宿主机 IP |
-| RAG 文档 | app 使用 volume `app_var`（`/app/var`），不会自动挂载本机 `./var/data/`；需 bind mount 或把文档放进 volume |
+| RAG 文档 | 每用户 `workspace/{user_id}/rag_data/`（与沙箱同根）；Docker 需 bind mount `./workspace` 或 `./var`；legacy `default` 可仍用 volume 内 `/app/var/data/` |
 
 | 命令 | 作用 |
 |------|------|
@@ -419,7 +432,7 @@ description: 何时使用该技能的简短说明
 | `/system-skills/` | 仓库 `skills/`（只读挂载） | ✅ | ❌ |
 | `src/`、`var/`、`.env` | — | ❌ 不可见 | ❌ |
 
-多用户：默认 Web UI 为每个浏览器分配 `ui-<id>` 沙箱（**勿设 `AGENT_USER_ID`**）。CLI 或单租户部署可设 `AGENT_USER_ID=alice` → `workspace/alice/`。Checkpointer 线程自动加 `{user_id}__` 前缀，避免跨用户串话；记忆在 `workspace/{user}/agent_memory/`。
+多用户：默认 Web UI 为每个浏览器分配 `ui-<id>` 沙箱（**勿设 `AGENT_USER_ID`**）。CLI 或单租户部署可设 `AGENT_USER_ID=alice` → `workspace/alice/`。Checkpointer 线程自动加 `{user_id}__` 前缀，避免跨用户串话；记忆在 `workspace/{user}/agent_memory/`；RAG 文档在 `workspace/{user}/rag_data/`，Milvus 检索带 `user_id` + `tenant_id` filter，不会跨用户命中向量。
 
 ### 测试
 
@@ -441,7 +454,7 @@ make test-integration
    │
    └─ 直接对话 ──→ Deep Agent
                     ├─ Skills（/system-skills/ → skills/，后者覆盖同名）
-                    ├─ rag_search → 平台 var/data + Milvus（不经 FS 工具）
+                    ├─ rag_search → workspace/{user}/rag_data + Milvus（metadata filter，不经 FS 工具）
                     ├─ MCP 工具
                     ├─ Skill 脚本（/system-skills/ 或 skills/）
                     └─ CompositeBackend（沙箱 workspace/{user}/ + 只读 /system-skills/）

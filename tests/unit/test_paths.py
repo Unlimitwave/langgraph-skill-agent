@@ -9,6 +9,8 @@ from langgraph_skill_agent.utility.paths import (
     PROJECT_ROOT,
     get_project_root,
     resolve_agent_workspace,
+    resolve_rag_data_dir,
+    resolve_rag_storage_dir,
 )
 
 
@@ -34,6 +36,13 @@ def test_resolve_agent_workspace_explicit_user() -> None:
     ws = resolve_agent_workspace("alice")
     assert ws.name == "alice"
     assert ws.parent == PROJECT_ROOT / "workspace"
+
+
+def test_resolve_rag_paths_under_user_workspace() -> None:
+    data_dir = resolve_rag_data_dir("alice")
+    storage_dir = resolve_rag_storage_dir("alice")
+    assert data_dir == PROJECT_ROOT / "workspace" / "alice" / "rag_data"
+    assert storage_dir == PROJECT_ROOT / "workspace" / "alice" / "rag_storage"
 
 
 def test_invalid_agent_user_id_rejected() -> None:

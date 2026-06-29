@@ -72,3 +72,13 @@ def resolve_user_skills_dir(user_id: str | None = None) -> Path:
 def resolve_agent_memory_dir(user_id: str | None = None) -> Path:
     """Per-user long-term memory blocks (co-located with sandbox)."""
     return resolve_agent_workspace(user_id) / "agent_memory"
+
+
+def resolve_rag_data_dir(user_id: str | None = None) -> Path:
+    """Per-user RAG source documents (co-located with sandbox)."""
+    return resolve_agent_workspace(user_id) / "rag_data"
+
+
+def resolve_rag_storage_dir(user_id: str | None = None) -> Path:
+    """Per-user LlamaIndex metadata for RAG (co-located with sandbox)."""
+    return resolve_agent_workspace(user_id) / "rag_storage"

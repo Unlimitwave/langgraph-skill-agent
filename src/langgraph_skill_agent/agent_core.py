@@ -24,6 +24,7 @@ from langchain.agents.middleware import before_model
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
+from langgraph.prebuilt.tool_node import ToolRuntime
 from langgraph.runtime import Runtime
 
 from langgraph_skill_agent.deepseek_model import (
@@ -99,12 +100,17 @@ def _deepseek_normalize_before_model(
 
 
 @tool
-def rag_search(query: str) -> str:
+def rag_search(query: str, runtime: ToolRuntime[AgentContext]) -> str:
     """知识库检索工具，用于回答用户关于知识库的问题。"""
     import time
 
+    ctx = runtime.context
+    retriever = _get_rag_retriever(ctx.user_id, ctx.tenant_id)
+    if retriever is None:
+        return "(no results)"
+
     t0 = time.perf_counter()
-    results = _get_rag_retriever().retrieve(query)
+    results = retriever.retrieve(query)
     lines: list[str] = []
     for i, nws in enumerate(results, start=1):
         node = getattr(nws, "node", None)
