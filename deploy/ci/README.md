@@ -18,11 +18,15 @@
 
 ## 质量门禁内容（`make ci`）
 
-- `uv sync --frozen`（锁定 `uv.lock`）
+- `uv sync --frozen --all-groups`（锁定 `uv.lock`；不含 `ui` extra，单测无需 Streamlit）
 - Python 3.12 版本校验
 - `ruff check` 静态检查
 - `pytest -m "not integration"` 单元测试
 - `uv build` 打 wheel 制品
+
+依赖下载走 **清华 PyPI 镜像**（`pyproject.toml` 的 `[[tool.uv.index]]` + CI 脚本 `UV_DEFAULT_INDEX`），`uv.lock` 内 wheel URL 亦指向镜像，避免 Gitee runner 直连 `files.pythonhosted.org` 超时。
+
+三条流水线均缓存 `~/.cache/uv` 与 `.venv`，二次构建显著加速。
 
 ## 本地复现
 

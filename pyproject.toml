@@ -50,6 +50,11 @@ langgraph-ui = "langgraph_skill_agent.frontend:main"
 [tool.uv]
 package = true
 
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

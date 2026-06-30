@@ -22,3 +22,6 @@ stages:
           - set -e
           - chmod +x deploy/ci/run-quality-gate.sh
           - ./deploy/ci/run-quality-gate.sh
+        cache:
+          - ~/.cache/uv
+          - .venv
