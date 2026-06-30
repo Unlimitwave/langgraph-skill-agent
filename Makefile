@@ -5,9 +5,9 @@
 # 前置: uv (https://docs.astral.sh/uv/)，Python 3.12（见 .python-version）
 
 .PHONY: help install lint format test test-integration run-ui run-agent \
-	python-check pre-commit-install pre-commit check ci clean \
+	python-check pre-commit-install pre-commit check security ci clean \
 	build docker-build docker-up docker-up-milvus docker-down docker-logs \
-	docker-stack-up docker-prod-up postgres-init-dbs
+	docker-stack-up docker-prod-up postgres-init-dbs deploy-remote
 
 COMPOSE_FILES = -f docker-compose.yml
 COMPOSE_MILVUS = $(COMPOSE_FILES) -f docker-compose.milvus.yml
@@ -52,7 +52,8 @@ format: ## Ruff 格式化 + 可安全 autofix
 # ---------------------------------------------------------------------------
 
 test: ## 单元测试（跳过 integration）
-	uv run pytest -q -m "not integration"
+	uv run pytest -q -m "not integration" \
+		$(if $(CI),--junitxml=pytest-report.xml,)
 
 test-integration: ## 集成测试（需 Milvus 等，见 docker-compose）
 	uv run pytest -q -m integration
@@ -109,9 +110,18 @@ run-agent: ## 启动 CLI 交互 Agent
 
 check: lint test ## MR 前一键自检（lint + 单测）
 
+security: ## 依赖漏洞 + 代码安全扫描（pip-audit, bandit）
+	@mkdir -p .cache/pip-audit
+	uv run pip-audit --cache-dir .cache/pip-audit
+	uv run bandit -r src -ll -q
+
 ci: ## CI 门禁（frozen lockfile + lint + 单测 + wheel；GitHub Actions 调用）
 	uv sync --frozen --all-groups --extra ui
 	@$(MAKE) python-check check build
+
+deploy-remote: ## 远程部署（需 IMAGE + TAG；CD / 服务器调用）
+	@chmod +x deploy/cd/deploy-remote.sh
+	@./deploy/cd/deploy-remote.sh
 
 clean: ## 清理缓存与构建产物
 	rm -rf .pytest_cache .ruff_cache dist build *.egg-info htmlcov

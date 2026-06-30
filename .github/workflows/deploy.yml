@@ -1,0 +1,73 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Build and push image]
+    types: [completed]
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag (git commit SHA from Build job)
+        required: true
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && vars.AUTO_DEPLOY_STAGING == 'true')
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+    steps:
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set image name (lowercase)
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          TAG: ${{ steps.tag.outputs.value }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/langgraph-skill-agent' }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ vars.DEPLOY_PORT || '22' }}
+          envs: IMAGE,TAG,DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            export IMAGE TAG
+            make deploy-remote
+
+      - name: Publish deploy summary
+        run: |
+          {
+            echo "### Deploy completed"
+            echo ""
+            echo "- **Image**: \`${{ env.IMAGE }}:${{ steps.tag.outputs.value }}\`"
+            echo "- **Environment**: \`${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
