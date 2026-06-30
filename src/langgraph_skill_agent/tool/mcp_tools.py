@@ -15,10 +15,9 @@ import re
 from collections.abc import Coroutine
 from typing import Annotated, Any
 
+from fastmcp import Client, FastMCP
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, create_model
-
-from fastmcp import Client, FastMCP
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +103,24 @@ def _args_model_for_tool(tool_name: str, input_schema: dict[str, Any] | None) ->
 
 def _tool_result_text(result: Any) -> str:
     if getattr(result, "is_error", False):
-        parts = [getattr(b, "text", "") for b in (getattr(result, "content", None) or []) if getattr(b, "text", None)]
+        parts = [
+            getattr(b, "text", "")
+            for b in (getattr(result, "content", None) or [])
+            if getattr(b, "text", None)
+        ]
         return "MCP tool error: " + ("\n".join(parts) if parts else "unknown error")
     data = getattr(result, "data", None)
     if data is not None:
-        return json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, (dict, list)) else str(data)
-    lines = [getattr(b, "text", "") for b in (getattr(result, "content", None) or []) if getattr(b, "text", None)]
+        return (
+            json.dumps(data, ensure_ascii=False, indent=2)
+            if isinstance(data, (dict, list))
+            else str(data)
+        )
+    lines = [
+        getattr(b, "text", "")
+        for b in (getattr(result, "content", None) or [])
+        if getattr(b, "text", None)
+    ]
     return "\n".join(lines) if lines else "(empty MCP result)"
 
 

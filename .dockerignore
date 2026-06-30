@@ -1,0 +1,36 @@
+# Virtual env & caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.DS_Store
+
+# Secrets & local runtime data (inject at runtime)
+.env
+.env.*
+!.env.example
+var/
+
+# Docker / deploy volumes (Milvus data lives on host, not in image)
+deploy/volumes/
+
+# Tests & docs (not needed in runtime image)
+tests/
+*.md
+!skills/**/*.md
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# CI / hooks
+.github/
+.pre-commit-config.yaml

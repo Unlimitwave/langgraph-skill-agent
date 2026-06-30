@@ -16,7 +16,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,15 +41,9 @@ logger = logging.getLogger(__name__)
 class UpdatedMemoryFiles(BaseModel):
     """模型输出的三个 Markdown 文件的完整替换内容（不是 diff）。"""
 
-    soul_md: str = Field(
-        description="agent 人格、语气、价值观、行为边界等；无则保持原意压缩重写。"
-    )
-    user_md: str = Field(
-        description="用户称呼、偏好、长期目标、禁忌等；对话中未提及则保留原文。"
-    )
-    memory_md: str = Field(
-        description="跨对话需记住的事实、约定、项目状态；用条目列表，避免重复。"
-    )
+    soul_md: str = Field(description="agent 人格、语气、价值观、行为边界等；无则保持原意压缩重写。")
+    user_md: str = Field(description="用户称呼、偏好、长期目标、禁忌等；对话中未提及则保留原文。")
+    memory_md: str = Field(description="跨对话需记住的事实、约定、项目状态；用条目列表，避免重复。")
 
 
 def _build_chat_model(*, streaming: bool = False):
@@ -98,11 +92,7 @@ def messages_json_to_transcript(
     if max_chars is not None and len(out) > max_chars:
         head = max_chars // 4
         tail = max_chars - head - 80
-        out = (
-            out[:head]
-            + f"\n\n...(中间已省略，共截断至约 {max_chars} 字符)...\n\n"
-            + out[-tail:]
-        )
+        out = out[:head] + f"\n\n...(中间已省略，共截断至约 {max_chars} 字符)...\n\n" + out[-tail:]
     return out
 
 
@@ -128,7 +118,7 @@ def _read_text(path: Path) -> str:
 def _backup_file(path: Path) -> Path | None:
     if not path.is_file():
         return None
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     bak = path.with_suffix(path.suffix + f".bak.{ts}")
     bak.write_bytes(path.read_bytes())
     return bak
@@ -195,9 +185,7 @@ def run_summary(
 
     model = _build_chat_model(streaming=False)
     # DeepSeek 等网关不支持 OpenAI 的 json_schema response_format；用工具调用解析结构化输出。
-    structured = model.with_structured_output(
-        UpdatedMemoryFiles, method="function_calling"
-    )
+    structured = model.with_structured_output(UpdatedMemoryFiles, method="function_calling")
     result: UpdatedMemoryFiles = structured.invoke(
         [
             {"role": "system", "content": summarizer_system},

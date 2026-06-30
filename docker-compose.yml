@@ -1,0 +1,39 @@
+# 默认：仅 Streamlit app 容器（Milvus / Embedding 走 .env 中的远程地址）。
+#
+# Usage:
+#   cp .env.example .env
+#   # .env 中 MILVUS_URI=http://your-remote-host:19530
+#   make docker-up
+#   open http://localhost:8501
+#
+# 若需本地 Milvus 栈：make docker-up-milvus（见 docker-compose.milvus.yml）
+#
+# 容器内访问宿主机 Embedding：EMBED_BASE_URL=http://host.docker.internal:8080/v1
+
+name: langgraph-skill-agent
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: langgraph-skill-agent:${TAG:-local}
+    ports:
+      - "${APP_PORT:-8501}:8501"
+    env_file:
+      - .env
+    environment:
+      PROJECT_ROOT: /app
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - app_var:/app/var
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  app_var:
