@@ -5,7 +5,7 @@
 # 前置: uv (https://docs.astral.sh/uv/)，Python 3.12（见 .python-version）
 
 .PHONY: help install lint format test test-integration run-ui run-agent \
-	python-check pre-commit-install pre-commit check clean \
+	python-check pre-commit-install pre-commit check ci clean \
 	build docker-build docker-up docker-up-milvus docker-down docker-logs \
 	docker-stack-up docker-prod-up postgres-init-dbs
 
@@ -108,6 +108,10 @@ run-agent: ## 启动 CLI 交互 Agent
 # ---------------------------------------------------------------------------
 
 check: lint test ## MR 前一键自检（lint + 单测）
+
+ci: ## CI 门禁（frozen lockfile + lint + 单测 + wheel；Gitee Go 调用）
+	uv sync --frozen --all-groups --extra ui
+	@$(MAKE) python-check check build
 
 clean: ## 清理缓存与构建产物
 	rm -rf .pytest_cache .ruff_cache dist build *.egg-info htmlcov

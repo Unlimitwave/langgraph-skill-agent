@@ -1,0 +1,33 @@
+# Gitee Go — Pull Request 质量门禁
+# 开启方式：仓库 → 流水线 → 开通 Gitee Go → 绑定本文件
+# 本地复现：make ci  或  ./deploy/ci/run-quality-gate.sh
+
+version: "1.0"
+name: pr-ci
+displayName: CI — Pull Request
+
+triggers:
+  pr:
+    branches:
+      prefix: []
+      precise: []
+      include: []
+      exclude: []
+
+stages:
+  - name: quality
+    displayName: 质量门禁
+    strategy: fast
+    trigger: auto
+    steps:
+      - step: build@python
+        name: quality_gate
+        displayName: Python 3.12 · lint · test · wheel
+        pythonVersion: "3.12"
+        commands:
+          - set -e
+          - chmod +x deploy/ci/run-quality-gate.sh
+          - ./deploy/ci/run-quality-gate.sh
+        cache:
+          - ~/.cache/uv
+          - .venv

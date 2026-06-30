@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from deepagents.middleware.filesystem import FilesystemPermission
 
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.agent_policy import (
     SYSTEM_SKILLS_ROUTE,
     agent_filesystem_permissions,
@@ -21,28 +22,11 @@ class AgentRole(StrEnum):
     REVIEW = "review"
 
 
-# 角色系统提示词
+# 角色系统提示词（manifest 版本化；见 prompts/manifest.json）
 ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
-    AgentRole.RESEARCH: (
-        "You are a Research Specialist. Your job is to gather facts from the knowledge base "
-        "and readable workspace files only.\n"
-        "- Use rag_search and read_file; never write or edit files.\n"
-        "- Cite sources (file paths / RAG hits) in your summary.\n"
-        "- End with a concise structured brief the Worker can act on."
-    ),
-    AgentRole.WORKER: (
-        "You are a Worker Specialist. Execute the assigned step using tools and skills.\n"
-        "- Follow [CTX-SYSTEM] persona and memory when present.\n"
-        "- Produce concrete artifacts (files, scripts output) in the user workspace.\n"
-        "- Stay within the single step objective; do not replan the whole project."
-    ),
-    AgentRole.REVIEW: (
-        "You are a Review Specialist (read-only). Audit the step output against acceptance criteria.\n"
-        "- Use read_file only; never write or edit.\n"
-        "- Compare against prior Research briefs and Worker artifacts when provided.\n"
-        "【输出格式】回复末尾必须包含且仅包含一个 JSON 对象（不要 markdown 代码块）：\n"
-        '{"passed": true|false, "feedback": "具体改进建议或确认说明", "summary": "审查结论一句话"}'
-    ),
+    AgentRole.RESEARCH: get_prompt("roles.research"),
+    AgentRole.WORKER: get_prompt("roles.worker"),
+    AgentRole.REVIEW: get_prompt("roles.review"),
 }
 
 

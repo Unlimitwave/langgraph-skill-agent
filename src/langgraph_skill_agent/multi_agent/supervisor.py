@@ -39,6 +39,7 @@ from langgraph_skill_agent.multi_agent.handoff import (
 )
 from langgraph_skill_agent.multi_agent.roles import AgentRole, role_display_name
 from langgraph_skill_agent.multi_agent.specialists import get_specialist_graph
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
 from langgraph_skill_agent.utility.hitl import HitlRequest
 from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
@@ -51,29 +52,6 @@ from langgraph_skill_agent.utility.streaming import (
 from langgraph_skill_agent.utility.tenant import normalize_user_id
 
 logger = logging.getLogger(__name__)
-
-# Planner 系统提示词
-_SUPERVISOR_PLANNER_SYSTEM = (
-    "你是企业级任务 Supervisor 的规划器。将用户目标拆成 3～8 个可执行步骤，"
-    "并为每步指定 Specialist 角色：\n"
-    "- research：检索知识库、阅读文件、产出调研摘要（只读）\n"
-    "- worker：写文件、跑技能/脚本、交付产物（可写）\n"
-    "- review：只读审查上一步 worker 产出，给出 pass/fail\n\n"
-    "规则：\n"
-    "1. 典型流水线：research → worker → review；复杂任务可有多轮 worker/review。\n"
-    "2. review 步骤必须 depends_on 其审查的 worker 步骤。\n"
-    "3. worker 若依赖调研，depends_on 对应 research 步骤。\n"
-    "4. 不要写工具调用语法，只写业务目标描述。\n\n"
-    "【输出格式】只输出一个 JSON 对象，不要其它说明文字，不要 markdown 代码块。格式：\n"
-    '{"tasks": [{"id": "1", "role": "research", "title": "...", "depends_on": []}, '
-    '{"id": "2", "role": "worker", "title": "...", "depends_on": ["1"]}, '
-    '{"id": "3", "role": "review", "title": "...", "depends_on": ["2"]}]}'
-)
-# 汇总节点系统提示词
-_SYNTHESIZER_SYSTEM = (
-    "你是 Supervisor 汇总节点。根据用户目标与各 Specialist 步骤摘要，"
-    "生成面向用户的最终答复：简洁、完整、可执行；不要暴露内部 JSON 或 thread id。"
-)
 
 
 class SupervisorState(TypedDict, total=False):
@@ -133,7 +111,7 @@ def _task_records_from_plan(plan: SupervisorPlanModel) -> list[TaskRecord]:
 def _invoke_supervisor_planner(goal: str) -> SupervisorPlanModel | None:
     llm = build_chat_model(streaming=False)
     msg = llm.invoke(
-        [SystemMessage(content=_SUPERVISOR_PLANNER_SYSTEM), HumanMessage(content=goal)]
+        [SystemMessage(content=get_prompt("supervisor.planner")), HumanMessage(content=goal)]
     )
     raw = message_content_to_str(getattr(msg, "content", None))
     data = extract_first_json_object(raw)
@@ -555,7 +533,7 @@ def synthesizer_node(state: SupervisorState) -> dict:
     llm = build_chat_model(streaming=False)
     msg = llm.invoke(
         [
-            SystemMessage(content=_SYNTHESIZER_SYSTEM),
+            SystemMessage(content=get_prompt("supervisor.synthesizer")),
             HumanMessage(content="\n".join(lines)),
         ]
     )

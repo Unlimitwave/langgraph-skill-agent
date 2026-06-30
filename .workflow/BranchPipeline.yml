@@ -1,0 +1,33 @@
+# Gitee Go — 功能分支 push 质量门禁（非 master/main）
+
+version: "1.0"
+name: branch-ci
+displayName: CI — Branch Push
+
+triggers:
+  push:
+    branches:
+      prefix: []
+      precise: []
+      include: []
+      exclude:
+        - master
+        - main
+
+stages:
+  - name: quality
+    displayName: 质量门禁
+    strategy: fast
+    trigger: auto
+    steps:
+      - step: build@python
+        name: quality_gate
+        displayName: Python 3.12 · lint · test · wheel
+        pythonVersion: "3.12"
+        commands:
+          - set -e
+          - chmod +x deploy/ci/run-quality-gate.sh
+          - ./deploy/ci/run-quality-gate.sh
+        cache:
+          - ~/.cache/uv
+          - .venv

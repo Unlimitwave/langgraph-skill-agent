@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from langgraph_skill_agent.agent_core import build_chat_model
 from langgraph_skill_agent.multi_agent.config import multi_agent_routing_enabled
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
 from langgraph_skill_agent.utility.logging_config import env_truthy
 
@@ -21,22 +22,6 @@ ExecutionMode = Literal["direct", "plan", "supervisor"]
 
 # 1=每轮 LLM 意图分类（direct/plan/supervisor）；0=按 ENABLE_MULTI_AGENT_ROUTING / ENABLE_PLAN_ROUTING 固定模式
 ENABLE_INTENT_ROUTING_ENV = "ENABLE_INTENT_ROUTING"
-
-_ROUTER_SYSTEM = """你是路由分类器，判断本轮用户输入应使用的执行模式。
-
-可选模式（仅能从下列已启用模式中选择）：
-{enabled_modes_block}
-
-模式说明：
-- direct：问候、闲聊、单轮问答、极短确认；一次 Deep Agent 对话即可。
-- plan：多步骤任务，但各步能力相同（检索+写文件+脚本），由同一 Worker 顺序执行。
-- supervisor：需要不同 Specialist 协作（调研 research → 交付 worker → 审查 review），
-  或用户明确要求分角色/审查/质检/调研后撰写等流水线。
-
-路由原则：
-- 宁可 direct：不确定时优先 direct，避免把简单对话做成重型流程。
-- supervisor 优先于 plan：若任务明显需要「调研+撰写+审查」分角色，选 supervisor（若已启用）。
-- plan：多步但不需要分角色审查时选 plan（若已启用）。"""
 
 
 class RouterModel(BaseModel):
@@ -122,7 +107,7 @@ def resolve_execution_mode(user_text: str) -> ExecutionMode:
 
     llm = build_chat_model(streaming=False)
     router_instruction = (
-        _ROUTER_SYSTEM.format(enabled_modes_block=modes_block)
+        get_prompt("intent.router", enabled_modes_block=modes_block)
         + "\n\n【输出格式】只输出一个 JSON 对象，不要其它说明文字，不要 markdown 代码块。示例："
         + '{"mode": "direct"}'
     )

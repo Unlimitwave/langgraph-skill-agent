@@ -1,0 +1,36 @@
+# Gitee Go — master/main 合并后质量门禁
+# 镜像推送（CD）见 deploy/ci/README.md，配置 Registry 后可追加 build@docker 阶段
+
+version: "1.0"
+name: master-ci
+displayName: CI — Master
+
+triggers:
+  push:
+    branches:
+      precise:
+        - master
+        - main
+    tags:
+      prefix: []
+      precise: []
+      include: []
+      exclude: []
+
+stages:
+  - name: quality
+    displayName: 质量门禁
+    strategy: fast
+    trigger: auto
+    steps:
+      - step: build@python
+        name: quality_gate
+        displayName: Python 3.12 · lint · test · wheel
+        pythonVersion: "3.12"
+        commands:
+          - set -e
+          - chmod +x deploy/ci/run-quality-gate.sh
+          - ./deploy/ci/run-quality-gate.sh
+        cache:
+          - ~/.cache/uv
+          - .venv

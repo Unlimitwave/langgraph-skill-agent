@@ -31,6 +31,7 @@ from langgraph_skill_agent.memory.tokens import (
     estimate_tokens,
     message_to_plain_text,
 )
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.messages import stringify_message_content
 
 
@@ -82,14 +83,7 @@ def _default_summarizer_model() -> BaseChatModel:
 def summarize_transcript(transcript: str, *, llm: BaseChatModel | None = None) -> str:
     """把早期对话剧本压成一段第三人称摘要（事实、决定、未完成任务）。"""
     model = llm or _default_summarizer_model()
-    sys = SystemMessage(
-        content=(
-            "You compress chat history for another assistant. "
-            "Output ONE concise markdown note in Chinese: key facts, user goals, "
-            "decisions, open tasks, file paths, and errors. Omit small talk. "
-            "Do not invent facts."
-        )
-    )
+    sys = SystemMessage(content=get_prompt("compactor.summarize"))
     human = HumanMessage(content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000])
     out = model.invoke([sys, human])
     text = stringify_message_content(getattr(out, "content", "")).strip()

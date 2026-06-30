@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from langgraph_skill_agent.agent_core import build_agent, build_chat_model
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
 from langgraph_skill_agent.utility.llm_json import extract_first_json_object, message_content_to_str
 from langgraph_skill_agent.utility.logging_config import configure_logging
@@ -58,19 +59,12 @@ class PlanExecuteState(TypedDict, total=False):
     current_todo_id: str | None
 
 
-_PLANNER_SYSTEM = (
-    "你是任务规划器。根据用户目标拆成若干可执行步骤；"
-    "描述每一步要达成的结果即可，不要写工具调用语法。\n\n"
-    "【输出格式】只输出一个 JSON 对象，不要其它说明文字，不要 markdown 代码块。格式：\n"
-    '{"todos": [{"id": "1", "title": "第一步描述"}, {"id": "2", "title": "第二步描述"}]}\n'
-    "共 3～8 条，id 为短字符串，顺序有意义。"
-)
-
-
 def _invoke_planner_llm(goal: str) -> PlanModel | None:
     """普通 chat 输出 JSON，避免 DeepSeek 不支持 LangChain structured parse。"""
     llm = build_chat_model(streaming=False)
-    msg = llm.invoke([SystemMessage(content=_PLANNER_SYSTEM), HumanMessage(content=goal)])
+    msg = llm.invoke(
+        [SystemMessage(content=get_prompt("plan.planner")), HumanMessage(content=goal)]
+    )
     raw = message_content_to_str(getattr(msg, "content", None))
     data = extract_first_json_object(raw)
     if not data:

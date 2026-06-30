@@ -40,6 +40,7 @@ from langgraph_skill_agent.memory import (
 from langgraph_skill_agent.memory.context import inject_context_before_model
 from langgraph_skill_agent.memory.pruning import slim_tool_output_middleware
 from langgraph_skill_agent.memory.session_store import create_checkpointer
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.rag import _get_rag_retriever
 from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
@@ -155,10 +156,7 @@ def build_agent_graph() -> Any:
     host_tools = make_host_skill_tools()
     extra_tools = [*host_tools, rag_search, *mcp_tools]
 
-    system_prompt = (
-        "You are a helpful assistant. Follow the layered [CTX-SYSTEM] context in messages "
-        "for persona, memory, task state, and procedures."
-    )
+    system_prompt = get_prompt("agent.system")
 
     return create_deep_agent(
         model=model,
