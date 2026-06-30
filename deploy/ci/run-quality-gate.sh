@@ -14,5 +14,5 @@ if ! command -v make >/dev/null 2>&1; then
   echo "error: make is required (install build-essential / make)" >&2
   exit 1
 fi
-
+export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 make ci
