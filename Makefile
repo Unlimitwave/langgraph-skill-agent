@@ -109,7 +109,7 @@ run-agent: ## 启动 CLI 交互 Agent
 
 check: lint test ## MR 前一键自检（lint + 单测）
 
-ci: ## CI 门禁（frozen lockfile + lint + 单测 + wheel；Gitee Go 调用；不含 ui extra）
+ci: ## CI 门禁（frozen lockfile + lint + 单测 + wheel；GitHub Actions 调用）
 	uv sync --frozen --all-groups --extra ui
 	@$(MAKE) python-check check build
 

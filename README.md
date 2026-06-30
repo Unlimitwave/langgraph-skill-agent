@@ -383,7 +383,7 @@ make docker-prod-up IMAGE=$IMAGE TAG=$TAG
 make help               # 列出全部命令
 make install            # 安装依赖
 make check              # MR 前：lint + 单测
-make ci                 # CI 门禁（与 Gitee Go 流水线一致）
+make ci                 # CI 门禁（与 GitHub Actions 一致）
 make python-check       # 校验 Python 3.12
 make pre-commit-install # 安装 git pre-commit hook
 make lint               # ruff 静态检查
@@ -401,9 +401,9 @@ make run-agent          # 裸机 CLI
 make pre-commit         # 手动跑全部 pre-commit 检查
 ```
 
-### CI（Gitee Go）
+### CI（GitHub Actions）
 
-流水线配置在 [`.workflow/`](.workflow/)，入口脚本 [`deploy/ci/run-quality-gate.sh`](deploy/ci/run-quality-gate.sh)。开通与分支保护见 [`deploy/ci/README.md`](deploy/ci/README.md)。
+流水线配置在 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，入口脚本 [`deploy/ci/run-quality-gate.sh`](deploy/ci/run-quality-gate.sh)。开通与分支保护见 [`deploy/ci/README.md`](deploy/ci/README.md)。
 
 ### 编写 Skill
 
