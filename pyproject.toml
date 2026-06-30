@@ -6,10 +6,13 @@ build-backend = "hatchling.build"
 name = "langgraph-skill-agent"
 version = "0.1.0"
 description = "Deep Agent (LangGraph) with local Skills and RAG (LlamaIndex + Milvus)"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "deepagents>=0.2.0",
     "langgraph>=1.1.0",
+    "langgraph-checkpoint-postgres>=3.0.0",
+    "langgraph-checkpoint-sqlite>=3.0.0",
+    "psycopg[binary,pool]>=3.2.0",
     "python-dotenv>=1.0.0",
     "langchain-openai>=0.2.0",
     "langchain-deepseek>=1.0.0",
@@ -30,6 +33,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pandas>=2.0",
+    "ruff>=0.9",
+    "pre-commit>=4.0",
 ]
 ui = [
     "streamlit>=1.32.0",
@@ -38,8 +43,25 @@ ui = [
 [project.scripts]
 langgraph-agent = "langgraph_skill_agent.agent_core:main"
 langgraph-plan = "langgraph_skill_agent.plan_execute:main"
+langgraph-supervisor = "langgraph_skill_agent.multi_agent.supervisor:main"
 langgraph-summary = "langgraph_skill_agent.memory.summary:main"
 langgraph-ui = "langgraph_skill_agent.frontend:main"
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pandas>=2.0",
+    "ruff>=0.9",
+    "pre-commit>=4.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/langgraph_skill_agent"]
@@ -47,3 +69,18 @@ packages = ["src/langgraph_skill_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: tests requiring external services (Milvus, API keys, etc.)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"

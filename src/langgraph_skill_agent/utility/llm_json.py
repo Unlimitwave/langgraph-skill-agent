@@ -1,4 +1,5 @@
 """从 LLM 文本回复中解析 JSON（兼容不支持 response_format / parse 的 API，如 DeepSeek）。"""
+
 from __future__ import annotations
 
 import json

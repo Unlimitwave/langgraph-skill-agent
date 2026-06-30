@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from langchain_core.messages import message_to_dict
@@ -24,7 +24,7 @@ def save_conversation_snapshot(
     snap = agent.get_state(config)
     values = getattr(snap, "values", None) or {}
     messages = values.get("messages") or []
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = hist_dir / f"{safe_tid}_{ts}.json"
     payload = {
         "thread_id": thread_id,

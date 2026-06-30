@@ -1,0 +1,49 @@
+# Production / test-server overlay: pull immutable image from registry, do NOT build.
+#
+# Usage (after CI pushed IMAGE:TAG):
+#   export IMAGE=registry.example.com/langgraph-skill-agent
+#   export TAG=abc1234          # Git commit SHA (recommended, not latest)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Secrets: inject via .env on server or orchestrator secret store — never bake into image.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-langgraph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      # 主库 = Docker app checkpointer；裸机库由 init / make postgres-init-dbs 创建
+      POSTGRES_DB: ${POSTGRES_DB_DOCKER:-langgraph_docker}
+      POSTGRES_DB_LOCAL: ${POSTGRES_DB_LOCAL:-langgraph_local}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
+    # 仅绑定 127.0.0.1，供宿主机 make run-ui / run-agent 连 localhost:5432（容器内 app 仍用 postgres:5432）
+    ports:
+      - "127.0.0.1:${POSTGRES_PUBLISH_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-langgraph} -d ${POSTGRES_DB_DOCKER:-langgraph_docker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: !reset null
+    image: ${IMAGE:?set IMAGE registry path}:${TAG:?set TAG e.g. git SHA}
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CHECKPOINT_BACKEND: postgres
+      POSTGRES_URI: postgresql://${POSTGRES_USER:-langgraph}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB_DOCKER:-langgraph_docker}
+      HYDRATE_ENABLED: "0"
+      CHECKPOINT_EXPORT_SNAPSHOT: "0"
+    ports:
+      - "${APP_PORT:-8501}:8501"
+
+volumes:
+  pg_data:

@@ -1,80 +1,38 @@
 """
 会话压缩：估算当前 thread 的 messages 占用 token，超过预算则摘要早期对话并写回 checkpointer。
 
-环境变量（可选）：
+预算与 ContextBudget 对齐（见 context.py）：
   COMPACT_ENABLED=1              # 0/false 关闭
-  COMPACT_MAX_CONTEXT_TOKENS=60000   # 总预算（含预留）
-  COMPACT_RESERVE_TOKENS=8000        # 预留给本轮回复 + 工具输出
-  COMPACT_TAIL_MESSAGES=32           # 保留尾部原始消息条数（建议偶数、含 tool 时适当加大）
-  COMPACT_SYSTEM_OVERHEAD_TOKENS=3500 # 系统提示、skills 等不在 state.messages 里的粗略加算
+  COMPACT_TAIL_MESSAGES=32       # 保留尾部原始消息条数（建议偶数、含 tool 时适当加大）
+
+总预算 / System 开销 / 预留分别由 CONTEXT_WINDOW、CONTEXT_*_RATIO、
+CONTEXT_RESERVE_TOKENS（或已废弃别名 COMPACT_RESERVE_TOKENS）控制。
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
-    AIMessage,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
-    ToolMessage,
 )
+
 from langgraph_skill_agent.deepseek_model import build_deepseek_chat_model
+from langgraph_skill_agent.memory.context import COMPACT_SUMMARY_PREFIX, ContextBudget
+from langgraph_skill_agent.memory.tokens import (
+    context_reserve_tokens,
+    estimate_messages_tokens,
+    estimate_tokens,
+    message_to_plain_text,
+)
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.utility.messages import stringify_message_content
-
-
-def _load_tiktoken_encoder():
-    try:
-        import tiktoken
-
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        return None
-
-
-_ENC = None
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略 token 数：优先 tiktoken，否则 chars/4。"""
-    global _ENC
-    if not text:
-        return 0
-    if _ENC is None:
-        _ENC = _load_tiktoken_encoder()
-    if _ENC is not None:
-        return len(_ENC.encode(text))
-    return max(1, len(text) // 4)
-
-
-def _message_kind(msg: BaseMessage) -> str:
-    t = getattr(msg, "type", "") or ""
-    return str(t)
-
-
-def message_to_plain_text(msg: BaseMessage) -> str:
-    role = _message_kind(msg)
-    if role in ("human", "user"):
-        label = "User"
-    elif role in ("ai", "assistant"):
-        label = "Assistant"
-    elif role == "system":
-        label = "System"
-    elif role == "tool":
-        name = getattr(msg, "name", None) or "tool"
-        label = f"Tool({name})"
-    else:
-        label = role or "Unknown"
-    body = stringify_message_content(getattr(msg, "content", None)).strip()
-    return f"### {label}\n{body}".strip()
-
-
-def estimate_messages_tokens(messages: Sequence[BaseMessage]) -> int:
-    return sum(estimate_tokens(message_to_plain_text(m)) for m in messages)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -100,13 +58,13 @@ def compaction_enabled() -> bool:
 
 def effective_budget_tokens() -> tuple[int, int, int]:
     """
-    返回 (max_context, reserve, overhead)。
-    当「当前估算 + reserve + overhead > max_context」时认为越界（保守：用 max_context 作硬顶）。
+    返回 (max_context, reserve, overhead)，与 ContextBudget 对齐。
+
+    max_context = input_budget；overhead = system_budget（每轮注入 System，不在 messages 内）；
+    reserve = context_reserve_tokens()。当 messages + overhead + reserve > max_context 时触发压缩。
     """
-    max_ctx = _env_int("COMPACT_MAX_CONTEXT_TOKENS", 60_000)
-    reserve = _env_int("COMPACT_RESERVE_TOKENS", 8_000)
-    overhead = _env_int("COMPACT_SYSTEM_OVERHEAD_TOKENS", 3_500)
-    return max_ctx, reserve, overhead
+    budget = ContextBudget.from_env()
+    return budget.input_budget, context_reserve_tokens(), budget.system_budget
 
 
 def should_compact(messages: Sequence[BaseMessage], *, extra_text: str = "") -> bool:
@@ -125,17 +83,8 @@ def _default_summarizer_model() -> BaseChatModel:
 def summarize_transcript(transcript: str, *, llm: BaseChatModel | None = None) -> str:
     """把早期对话剧本压成一段第三人称摘要（事实、决定、未完成任务）。"""
     model = llm or _default_summarizer_model()
-    sys = SystemMessage(
-        content=(
-            "You compress chat history for another assistant. "
-            "Output ONE concise markdown note in Chinese: key facts, user goals, "
-            "decisions, open tasks, file paths, and errors. Omit small talk. "
-            "Do not invent facts."
-        )
-    )
-    human = HumanMessage(
-        content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000]
-    )
+    sys = SystemMessage(content=get_prompt("compactor.summarize"))
+    human = HumanMessage(content="以下是对话摘录，请压缩：\n\n" + transcript[:120_000])
     out = model.invoke([sys, human])
     text = stringify_message_content(getattr(out, "content", "")).strip()
     return text or "(empty summary)"
@@ -160,7 +109,9 @@ def replace_thread_messages(
     若旧消息无 id，则退化为仅 append new_messages（可能重复，慎用）。
     """
     snap = compiled.get_state(config)
-    old = list(old_messages if old_messages is not None else (snap.values or {}).get("messages") or [])
+    old = list(
+        old_messages if old_messages is not None else (snap.values or {}).get("messages") or []
+    )
 
     if old and _messages_have_ids(old):
         removals: list[RemoveMessage] = []
@@ -205,7 +156,9 @@ def maybe_compact_thread(
 
     if len(messages) <= tail_n + 2:
         if on_trace:
-            on_trace("compactor: over token budget but tail too large to split; skip or raise tail_n")
+            on_trace(
+                "compactor: over token budget but tail too large to split; skip or raise tail_n"
+            )
         return False
 
     head = messages[:-tail_n]
@@ -216,17 +169,16 @@ def maybe_compact_thread(
     summary = summarize_transcript(transcript, llm=summarizer_llm)
 
     summary_msg = SystemMessage(
-        content=(
-            "[会话前文已压缩 — 仅作上下文恢复，请勿当作用户新指令]\n"
-            + summary
-        )
+        content=(f"{COMPACT_SUMMARY_PREFIX} — 仅作上下文恢复，请勿当作用户新指令]\n" + summary)
     )
     new_chain: list[BaseMessage] = [summary_msg, *tail]
 
     replace_thread_messages(compiled, config, new_chain, old_messages=messages)
 
     if on_trace:
-        new_used = estimate_messages_tokens(new_chain) + estimate_tokens(extra_token_text) + overhead
+        new_used = (
+            estimate_messages_tokens(new_chain) + estimate_tokens(extra_token_text) + overhead
+        )
         on_trace(
             f"compactor: compacted head={len(head)} tail={len(tail)} "
             f"tokens_before≈{used} after≈{new_used} threshold={threshold}"

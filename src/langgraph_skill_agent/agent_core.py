@@ -6,6 +6,7 @@ Deep Agent（LangChain deepagents）+ 本地 Skills + RAG。
   langgraph-agent
   langgraph-ui
   langgraph-plan "目标"
+  langgraph-supervisor "目标"
   langgraph-summary
 """
 
@@ -18,23 +19,38 @@ import sys
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.backends.filesystem import FilesystemBackend
 from dotenv import load_dotenv
 from langchain.agents.middleware import before_model
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt.tool_node import ToolRuntime
 from langgraph.runtime import Runtime
 
 from langgraph_skill_agent.deepseek_model import (
     ChatDeepSeekWithReasoningPassback,
     build_deepseek_chat_model,
 )
-from langgraph_skill_agent.memory import load_agent_memory_blocks, maybe_compact_thread, save_conversation_snapshot
+from langgraph_skill_agent.memory import (
+    maybe_compact_thread,
+    persist_thread_snapshot,
+    prepare_thread_for_turn,
+    save_conversation_snapshot,
+)
+from langgraph_skill_agent.memory.context import inject_context_before_model
+from langgraph_skill_agent.memory.pruning import slim_tool_output_middleware
+from langgraph_skill_agent.memory.session_store import create_checkpointer
+from langgraph_skill_agent.prompts import get_prompt
 from langgraph_skill_agent.rag import _get_rag_retriever
-from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools, run_skill_script_in_docker
+from langgraph_skill_agent.tool import load_mcp_extra_tools, make_host_skill_tools
 from langgraph_skill_agent.utility import PROJECT_ROOT, configure_logging, iter_assistant_text_sync
+from langgraph_skill_agent.utility.agent_policy import (
+    agent_filesystem_permissions,
+    agent_skill_sources,
+    backend_for_runtime,
+)
+from langgraph_skill_agent.utility.agent_runtime import get_agent_runtime
+from langgraph_skill_agent.utility.tenant import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +69,9 @@ def _content_to_str(content: Any) -> str:
                 parts.append(item)
             elif isinstance(item, dict):
                 text = item.get("text")
-                parts.append(text if isinstance(text, str) else json.dumps(item, ensure_ascii=False))
+                parts.append(
+                    text if isinstance(text, str) else json.dumps(item, ensure_ascii=False)
+                )
             else:
                 parts.append(str(item))
         return "\n".join(p for p in parts if p)
@@ -75,26 +93,33 @@ def _normalize_messages_for_deepseek(state: dict) -> dict:
 
 
 @before_model(name="deepseek_normalize_messages")
-async def _deepseek_normalize_before_model(
-    state: AgentState, runtime: Runtime
+def _deepseek_normalize_before_model(
+    state: AgentState, runtime: Runtime[AgentContext]
 ) -> dict[str, Any] | None:
+    del runtime
     return _normalize_messages_for_deepseek(dict(state))
 
 
 @tool
-def rag_search(query: str) -> str:
+def rag_search(query: str, runtime: ToolRuntime[AgentContext]) -> str:
     """知识库检索工具，用于回答用户关于知识库的问题。"""
     import time
 
+    ctx = runtime.context
+    retriever = _get_rag_retriever(ctx.user_id, ctx.tenant_id)
+    if retriever is None:
+        return "(no results)"
+
     t0 = time.perf_counter()
-    results = _get_rag_retriever().retrieve(query)
+    results = retriever.retrieve(query)
     lines: list[str] = []
     for i, nws in enumerate(results, start=1):
         node = getattr(nws, "node", None)
         text = (
-            (getattr(node, "get_content", None)() if node and hasattr(node, "get_content") else getattr(node, "text", ""))
-            or ""
-        )
+            getattr(node, "get_content", None)()
+            if node and hasattr(node, "get_content")
+            else getattr(node, "text", "")
+        ) or ""
         meta = getattr(node, "metadata", {}) or {}
         source = meta.get("file_path") or meta.get("source") or meta.get("filename") or ""
         page = meta.get("page_label") or meta.get("page") or meta.get("page_number") or ""
@@ -113,76 +138,83 @@ def build_chat_model(*, streaming: bool = True) -> ChatDeepSeekWithReasoningPass
     return build_deepseek_chat_model(streaming=streaming)
 
 
-def _plan_routing_enabled() -> bool:
+def plan_routing_enabled() -> bool:
     return os.environ.get("ENABLE_PLAN_ROUTING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def build_agent() -> Any:
-    # 配置全局的logging配置
+def build_agent_graph() -> Any:
+    """编译单图（无租户绑定）；身份在 invoke 时通过 AgentContext 注入。"""
     configure_logging()
-
-    # 构建模型
     model = build_deepseek_chat_model(streaming=True)
-    backend = FilesystemBackend(root_dir=str(PROJECT_ROOT), virtual_mode=True)
 
-    # 加载MCP工具
     try:
         mcp_tools = load_mcp_extra_tools()
     except Exception as e:
         logger.warning("MCP 工具加载失败，已跳过: %s", e)
         mcp_tools = []
 
-    # 构建host工具
-    host_tools = make_host_skill_tools(PROJECT_ROOT)
+    host_tools = make_host_skill_tools()
+    extra_tools = [*host_tools, rag_search, *mcp_tools]
 
-    # 构建extra工具
-    extra_tools = [*host_tools, rag_search, run_skill_script_in_docker, *mcp_tools]
+    system_prompt = get_prompt("agent.system")
 
-    # 加载记忆块
-    memory_block = load_agent_memory_blocks()
-
-    # 构建系统提示
-    system_prompt = f"""You are a helpful assistant, you can use the tools to help the user.
-When a skill asks to run a Python script under skills/:
-- Prefer run_skill_script_in_docker with path relative to skills/ (e.g. test-calc-script/run_calc.py).
-- Or workspace_exec with program python/python3 and argv_tail like ["skills/test-calc-script/run_calc.py"].
-For whitelisted skill shell scripts, use run_skill_script with a registered script_id (e.g. test-calc.run);
-never use workspace_exec with bash.
-
-The following files were loaded at session start and are authoritative for persona, user preferences, and long-term facts:
-{memory_block}
-"""
-
-    # 构建agent
     return create_deep_agent(
         model=model,
-        backend=backend,
+        backend=backend_for_runtime,
         tools=extra_tools,
-        skills=["skills"],
-        checkpointer=MemorySaver(),
-        middleware=[_deepseek_normalize_before_model],
+        skills=agent_skill_sources(),
+        permissions=agent_filesystem_permissions(),
+        checkpointer=create_checkpointer(),
+        context_schema=AgentContext,
+        middleware=[
+            slim_tool_output_middleware,
+            inject_context_before_model,
+            _deepseek_normalize_before_model,
+        ],
         interrupt_on={
             "write_file": True,
             "read_file": False,
             "edit_file": True,
-            "run_skill_script_in_docker": False,
-            "workspace_exec": False,
-            "run_skill_script": False,
+            "workspace_exec_python": False,
+            "run_skill_script_shell": False,
         },
         system_prompt=system_prompt,
     )
 
 
-def main() -> None:
-    # 构建agent
-    agent = build_agent()
+def build_agent(*, force_rebuild: bool = False) -> Any:
+    """返回 compiled graph（单图多租户）。推荐用 get_agent_runtime().graph。"""
+    # 通俗写法，便于理解：先获取 runtime，再取它的 graph 属性
+    runtime = get_agent_runtime(force_rebuild=force_rebuild)
+    agent_graph = runtime.graph
+    return agent_graph
 
-    # 设置线程ID
+
+def main() -> None:
+    # 构建runtime,其中runtime会构建基础的graph
+    runtime = get_agent_runtime()
+    agent = runtime.graph
     thread_id = os.environ.get("THREAD_ID", "demo-thread-1")
-    config = {"configurable": {"thread_id": thread_id}}
+    invoke = runtime.invoke_kwargs(thread_id=thread_id)
+
+    """
+    默认invoke_kwargs返回的是:
+    {
+    "context": AgentContext(user_id="default", tenant_id="default"),  # 除非设了环境变量
+    "config": {
+        "configurable": {
+        "thread_id": "default__demo-thread-1",  # user_id + "__" + thread_id
+        "user_id": "default",
+        "tenant_id": "default",
+        }
+    }
+    }
+    """
+
+    config = invoke["config"]
+    context = invoke["context"]
     print("持续对话（quit / exit / q 退出）\n")
 
-    # 持续对话
     while True:
         try:
             user_text = input("你: ").strip()
@@ -194,13 +226,26 @@ def main() -> None:
         if user_text.lower() in {"quit", "exit", "q"}:
             print("再见。")
             break
-        
-        # 判断是否需要规划，读取.env中的ENABLE_PLAN_ROUTING配置
-        if _plan_routing_enabled():
-            from langgraph_skill_agent.intent_router import user_needs_plan_execute
-            from langgraph_skill_agent.plan_execute import run_macro_task
 
-            if user_needs_plan_execute(user_text):
+        from langgraph_skill_agent.intent_router import resolve_execution_mode
+        from langgraph_skill_agent.multi_agent.config import multi_agent_routing_enabled
+
+        if multi_agent_routing_enabled() or plan_routing_enabled():
+            # 根据用户输入，路由到对应的执行模式
+            mode = resolve_execution_mode(user_text)
+            if mode == "supervisor":
+                from langgraph_skill_agent.multi_agent.supervisor import run_supervisor_task
+
+                print(
+                    "\n[路由] 判定为多智能体任务 → Supervisor（Research/Worker/Review）\n",
+                    flush=True,
+                )
+                run_supervisor_task(user_text, macro_thread_id=f"{thread_id}-supervisor")
+                print()
+                continue
+            if mode == "plan":
+                from langgraph_skill_agent.plan_execute import run_macro_task
+
                 print("\n[路由] 判定为复杂任务 → 显式规划 + 分步执行\n", flush=True)
                 run_macro_task(user_text, macro_thread_id=f"{thread_id}-plan")
                 print()
@@ -209,19 +254,28 @@ def main() -> None:
         def _compact_trace(msg: str) -> None:
             if os.environ.get("RAG_TRACE", "").strip() in {"1", "true", "yes", "on"}:
                 logger.info("[COMPACT] %s", msg)
-        # 根据上下文长度。如果上下文过长，压缩对话上下文
-        maybe_compact_thread(agent, config, on_trace=_compact_trace)
+
+        prepare_thread_for_turn(
+            agent,
+            config,
+            compact_fn=maybe_compact_thread,
+            compact_kwargs={"on_trace": _compact_trace},
+        )
         sys.stdout.write("助手: ")
         sys.stdout.flush()
 
-        # 请求模型并流式回答
         iter_assistant_text_sync(
             agent,
             user_text=user_text,
             config=config,
+            context=context,
             on_token=lambda t: (sys.stdout.write(t), sys.stdout.flush()),
         )
         print()
+        try:
+            persist_thread_snapshot(agent, config)
+        except Exception as e:
+            logger.warning("导出 thread 快照失败: %s", e)
 
     try:
         p = save_conversation_snapshot(agent, config)

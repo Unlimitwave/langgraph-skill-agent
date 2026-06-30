@@ -6,6 +6,13 @@ import logging
 import os
 import sys
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def env_truthy(name: str) -> bool:
+    """环境变量是否为真（1 / true / yes / on，大小写不敏感）。"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
+
 
 def configure_logging() -> None:
     """从环境变量 LOG_LEVEL 读取级别（默认 INFO），格式含时间与 logger 名。"""

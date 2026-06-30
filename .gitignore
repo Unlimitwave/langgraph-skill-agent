@@ -2,12 +2,15 @@
 ._.git
 .DS_Store
 ._.gitignore
-.vscode/*
+.vscode/
 ._*
 var/
+deploy/volumes/
 dist/
 build/
 *.egg-info/
 .venv/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+workspace/
